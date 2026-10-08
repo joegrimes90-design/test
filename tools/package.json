@@ -1,0 +1,9 @@
+{
+  "name": "atticus-tools",
+  "private": true,
+  "type": "module",
+  "description": "Build tools for Atticus's Big Day: voice generation and cartoon video rendering",
+  "devDependencies": {
+    "playwright": "1.56.1"
+  }
+}
