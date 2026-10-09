@@ -452,6 +452,8 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     return entry;
   }
   function store(entry) {
+    const old = cache.get(entry.key);
+    if (old) { byUrl.delete(old.url); st.bytes -= old.bytes; } // (never happens: requests are shared)
     cache.set(entry.key, entry);
     byUrl.set(entry.url, entry);
     st.bytes += entry.bytes;
@@ -489,10 +491,12 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       await selfCheck();
       while (queue.length) {
         const job = queue.shift();
-        let entry = null;
-        if (mode === 'bitmap') { try { entry = await runJob(job); } catch (e) { entry = null; } }
-        if (entry) store(entry);
-        else if (mode === 'bitmap') failed.add(job.key);
+        let entry = cache.get(job.key) || null; // painted meanwhile (by a tween)
+        if (!entry && mode === 'bitmap') {
+          try { entry = await runJob(job); } catch (e) { entry = null; }
+          if (entry) store(entry);
+          else if (mode === 'bitmap') failed.add(job.key);
+        }
         inflight.delete(job.key);
         job.resolve(entry);
       }
@@ -682,7 +686,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       const id = im.dataset.sprite;
       const key = keyOf(id, k);
       let e = cache.get(key);
-      if (!e && !failed.has(key) && svgReady.has(id) && estimate(id, k) <= SYNC_MS) {
+      if (!e && !failed.has(key) && !inflight.has(key) && svgReady.has(id) && estimate(id, k) <= SYNC_MS) {
         e = bake(id, k, svgReady.get(id));
         if (e) { st.syncJobs++; store(e); }
       }
