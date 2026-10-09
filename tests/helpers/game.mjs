@@ -212,8 +212,12 @@ export async function tapElement(page, selector) {
 /**
  * Play the current scene like a child would until `until` holds in the page.
  * Returns {time, actions, log}. Throws if nothing happens for `idleClock` seconds.
+ * exactRubs: every point of a rub is its own pointer move (a frame apart). Otherwise the browser
+ * merges the moves that arrive within one frame, so how many reach the game depends on timing,
+ * and the game draws random numbers for each one (foam, bubbles): the rest of the playthrough
+ * then varies from run to run. (Off by default: the visual baselines were recorded without it.)
  */
-export async function autoPlay(page, until, { maxClock = 900, idleClock = 60, fps = 10, maxActions = 600 } = {}) {
+export async function autoPlay(page, until, { maxClock = 900, idleClock = 60, fps = 10, maxActions = 600, exactRubs = false } = {}) {
   const log = [];
   const t0 = await page.evaluate(() => AT.engine.time);
   for (let i = 0; i < maxActions; i++) {
@@ -228,7 +232,10 @@ export async function autoPlay(page, until, { maxClock = 900, idleClock = 60, fp
       const p = await page.evaluate(() => window.__auto.aim());
       await page.mouse.click(p.x, p.y);
     } else {
-      for (const [x, y] of a.path) await page.mouse.move(x, y);
+      for (const [x, y] of a.path) {
+        await page.mouse.move(x, y);
+        if (exactRubs) await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      }
     }
   }
   throw new Error(`auto-player gave up after ${maxActions} actions`);

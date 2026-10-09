@@ -289,7 +289,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   const failed = new Set();     // keys that cannot be painted (too big, decode errors)
   const pendingFit = new Set(); // imgs created since the last microtask flush
   const idleWaiters = [];
-  const st = { jobs: 0, ms: 0, hits: 0, misses: 0, svgFallbacks: 0, bytes: 0, decoded: 0, evicted: 0, syncJobs: 0, dropped: 0, resnaps: 0, asyncJobs: 0, asyncMs: 0, asyncFallbacks: 0, asyncKept: 0, asyncStored: 0, prefetched: 0, idleJobs: 0, playMisses: 0, stored: 0, storedBad: 0 };
+  const st = { jobs: 0, ms: 0, hits: 0, misses: 0, svgFallbacks: 0, bytes: 0, decoded: 0, evicted: 0, syncJobs: 0, dropped: 0, resnaps: 0, asyncJobs: 0, asyncMs: 0, asyncFallbacks: 0, asyncKept: 0, asyncStored: 0, prefetched: 0, idleJobs: 0, playMisses: 0, playRandom: 0, playLate: 0, stored: 0, storedBad: 0, nearHits: 0 };
   const debug = params.get('debug') === '1';
   const SYNC_MS = 40; // a bitmap estimated to cost at most this may be painted on the spot (never inside an input event)
   let running = false, flushQueued = false, busy = 0, useClock = 0;
@@ -919,6 +919,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   // direct caller (always painted). Resolves null when it could not or need not be painted.
   // by.tag: {alive, pri} of a prefetch (prefetchScene, idlePrefetch).
   function rasterize(id, k, by) {
+    k = nearK(id, k);
     const key = keyOf(id, k);
     const hit = cache.get(key);
     if (hit) return Promise.resolve(hit);
@@ -1019,6 +1020,53 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     }
     return s < 0 ? b : s;
   }
+  // The scale key to use for sprite id at k: k itself, unless k is not cached, being painted or stored
+  // and the next key up or down (k +- 0.001) is, within 0.1% of k (scales of 1 and up). Both are within
+  // round3's own rounding of the exact scale (an img's key and its scene manifest's can round apart:
+  // 1.4925 at 1194x834 came out as 1.492 for the imgs and 1.493 from the manifest, so everything was
+  // painted twice), and apply() maps either one 1:1 onto the device pixels.
+  function nearK(id, k) {
+    const has = (kk) => { const key = keyOf(id, kk); return cache.has(key) || jobs.has(key); };
+    if (has(k)) return k;
+    const up = round3(k + 0.001), dn = round3(k - 0.001);
+    const ok = (kk) => kk >= 0.01 && Math.abs(kk / k - 1) <= 0.001 + 1e-9;
+    for (const kk of [up, dn]) if (ok(kk) && has(kk)) { st.nearHits++; return kk; }
+    if (stored(id, k)) return k;
+    for (const kk of [up, dn]) if (ok(kk) && stored(id, kk)) { st.nearHits++; return kk; }
+    return k;
+  }
+  // A bitmap asked for while a scene is played (not behind its cover) that is not painted yet:
+  // playMisses when the scene's manifest (js/sprite-manifest.js) does not list it (a stale
+  // manifest: ?debug=1 names it), playRandom for sizes no list can hold (unpredictable), playLate
+  // when it is listed but still being painted. how: 'exact' (a sprite at rest, or at a CSS
+  // animation's peak), 'tween' (a scale tween's 2^(1/8) step), 'step' (a scale that changes every
+  // frame: 2^(1/32)) or 'particle'.
+  function missed(id, k, key, how) {
+    if (!playing || cache.has(key)) return;
+    const job = jobs.get(key);
+    if (job) { if (job.by.some((r) => r.tag)) st.playLate++; return; }
+    if (unpredictable(id, k, how)) { st.playRandom++; return; }
+    st.playMisses++;
+    if (debug) console.warn('[AT.art] painted during play:', key);
+  }
+  // Sizes no manifest can list: random ones (balloons and soap bubbles at rest, particles, foam
+  // popping up to a random size: the scene lists the sizes seen when the list was made, not all there
+  // can be), and a pulsing sprite stopped at whatever size that moment left it (an exact scale within
+  // the steps it pulses through: the wiggly-feeling lines).
+  function unpredictable(id, k, how) {
+    const m = typeof window !== 'undefined' && window.AT_SPRITES && AT.sceneName && window.AT_SPRITES.scenes[AT.sceneName];
+    if (!m) return false;
+    if (how === 'exact' && randomScale(id, k)) return true;
+    const u = unitScale();
+    let lo = Infinity, hi = 0;
+    for (const e of m) {
+      if (e[0] !== id) continue;
+      if (e.length === 4 && ((how === 'particle' && e[3] === 4) || (how === 'tween' && e[3] === 0))) return true;
+      if (e.length === 3 && e[2] === 32) { lo = Math.min(lo, stepWindow(e[1], 32)[0] * u); hi = Math.max(hi, stepWindow(e[1], 32)[1] * u); }
+    }
+    if (how === 'tween' && randomTweens(m).has(id)) return true;
+    return how === 'exact' && k >= lo / TRACK && k <= hi;
+  }
   // Does the current scene's manifest list sprite id at random sizes ([id, lo, hi, 0]) around k, and
   // not at k itself? (An exact size listed among random ones is one the scene uses every time: the
   // hand-washing foam blobs at rest. That one is painted ahead and stored like any other.)
@@ -1106,17 +1154,14 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     const id = im.dataset.sprite;
     if (tuning.oversample !== 1) k = round3(k * tuning.oversample);
     if (!sprites[id] || !(k >= 0.01) || !isFinite(k)) { if (!defer) ensureSvg(im); return null; } // (scale 0: SVG, as before)
+    k = nearK(id, k);
     const key = keyOf(id, k);
     im._atWant = key;
     const hit = cache.get(key);
     if (hit) { st.hits++; apply(im, hit); return null; }
     st.misses++;
     if (!defer) ensureSvg(im); // (deferred: a scene behind its cover, put in at the end)
-    if (playing && !cache.has(key) && !jobs.has(key)) {
-      // painted during play: the scene's manifest (js/sprite-manifest.js) does not list it
-      st.playMisses++;
-      if (debug) console.warn('[AT.art] painted during play:', key);
-    }
+    missed(id, k, key, kmaxOf(im) ? 'particle' : urgent ? 'step' : 'exact');
     busy++;
     return rasterize(id, k, { im, urgent: !!urgent, defer: !!defer }).then((entry) => {
       if (!defer && entry && im._atWant === key && mode === 'bitmap' && im.dataset.sprite === id && byUrl.has(entry.url)) {
@@ -1146,11 +1191,13 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     const kb = +im.dataset.k || 0;
     if (kb >= k / 1.01 && kb <= k * slack) return; // what it shows will do
     let e = cache.get(keyOf(id, k)) || cachedBetween(id, k, k * slack);
-    if (!e && bucket) note(id, raw || k, bucket);
-    const kk = e ? e.k : bucket ? bucketUp(k, bucket) : round3(k);
+    if (!e && bucket) note(id, raw || k, bucket, im);
+    const kk = e ? e.k : bucket ? bucketUp(k, bucket) : nearK(id, round3(k));
     const key = keyOf(id, kk);
     if (im._atWant === key && jobs.has(key)) return; // already on its way (SVG meanwhile)
     if (!e) e = cache.get(key);
+    // not painted ahead: the SVG is shown (or it is painted on the spot) during play
+    if (!e) missed(id, kk, key, bucket === 8 ? 'tween' : bucket ? 'step' : 'exact');
     const cheap = estimate(id, kk) <= SYNC_MS, input = inInput();
     if (!e && !failed.has(key) && !jobs.has(key) && cheap && svgReady.has(id) && !input && !stored(id, kk)) {
       e = bake(id, kk, svgReady.get(id));
@@ -1186,23 +1233,32 @@ ${ink('ks', 1.6, 1.6, 0.25)}
 
   // ----- sprite log (?spritelog=1, for tools/sprite-manifest.mjs) -----
   // Every bitmap request, relative to the stage: [scene, sprite, scale / (stage scale x
-  // devicePixelRatio), steps]: steps 0 for an exact scale; 8 (scale tweens) or 32 (scales
+  // devicePixelRatio), steps]: steps 0 for an exact scale, with a fifth column: how many imgs
+  // asked for it (several imgs of one sprite at one exact scale is a size the scene uses, even
+  // among random ones: the hand-washing foam blobs at rest); 8 (scale tweens) or 32 (scales
   // that change every frame) for a request rounded up to the next 2^(1/steps) step, one row
   // per step; 4 for particles (random sizes), as two rows: the lowest and highest seen.
   const spriteLog = params.get('spritelog') === '1' ? new Map() : null;
-  const unitScale = () => dpr() * ((AT.engine && AT.engine.scale) || 1);
-  function note(id, raw, n) {
+  // device pixels per stage unit, from the stage's device matrix: the very arithmetic the sprites' own
+  // scales come from (DOMMatrix.scale() takes single-precision floats: at 1194x834, 2 x 0.74625 comes
+  // out as 1.49249995, not 1.4925, and the manifest's keys must round the same way as the imgs')
+  const unitScale = () => { const E = AT.engine; return E && E.stage ? scaleOf(cumMatrix(E.stage)) : dpr(); };
+  function note(id, raw, n, im) {
     const sc = spriteLog && AT.sceneName;
     if (!sc || !(raw > 0)) return;
     const rel = raw / unitScale();
     const key = n === 4 ? `${sc}|${id}|4` : n ? `${sc}|${id}|${n}|${bucketUp(raw, n)}` : `${sc}|${id}|0|${rel.toFixed(7)}`;
-    const e = spriteLog.get(key);
-    if (!e) spriteLog.set(key, [sc, id, rel, n, rel]);
+    let e = spriteLog.get(key);
+    if (!e) spriteLog.set(key, (e = [sc, id, rel, n, rel, new Set()]));
     else { e[2] = Math.min(e[2], rel); e[4] = Math.max(e[4], rel); }
+    if (im) e[5].add(im);
   }
   const spriteLogRows = () => {
     const out = [];
-    for (const [sc, id, lo, n, hi] of spriteLog ? spriteLog.values() : []) { out.push([sc, id, lo, n]); if (n === 4 && hi !== lo) out.push([sc, id, hi, n]); }
+    for (const [sc, id, lo, n, hi, imgs] of spriteLog ? spriteLog.values() : []) {
+      out.push(n ? [sc, id, lo, n] : [sc, id, lo, n, Math.max(1, imgs.size)]);
+      if (n === 4 && hi !== lo) out.push([sc, id, hi, n]);
+    }
     return out;
   };
   // Particles (E.burst/E.floatUp: data-kmax on the node = the largest scale it reaches)
@@ -1229,7 +1285,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     if (mode !== 'bitmap') return null;
     if (underTween(im)) { ensureSvg(im); return null; } // tweens refit when they end
     const [raw, n] = wantedRaw(im, pass);
-    note(im.dataset.sprite, raw, n);
+    note(im.dataset.sprite, raw, n, im);
     return want(im, kFrom(raw, n), defer);
   }
   // Fit every sprite img under root to its current device scale. Resolves once all are bitmaps
@@ -1262,22 +1318,42 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   // ----- prefetching from the scene manifest (js/sprite-manifest.js, tools/sprite-manifest.mjs) -----
   // The bitmaps a scene asks for while it is played, as [id, k] for this screen: [id, s] is the
   // exact scale s x stage scale x devicePixelRatio, [id, s, n] the 2^(1/n) step at or above it,
-  // [id, lo, hi, n] every step from lo to hi (particles); random exact scales ([id, lo, hi, 0]:
-  // balloons, soap bubbles) cannot be painted ahead.
+  // [id, lo, hi, n] every step from lo to hi (particles); random exact
+  // scales ([id, lo, hi, 0]: balloons, soap bubbles) cannot be painted ahead. Steps were recorded
+  // at the manifest's unit (1280x720 at 2x): a step there stands for every scale that came out as
+  // that step, which on another screen can be either of two steps (one at the manifest's own size).
+  const manifestUnit = () => (typeof window !== 'undefined' && window.AT_SPRITES && window.AT_SPRITES.unit) || 1.6;
+  // the relative scales (lo, hi] that come out as the same 2^(1/n) step as rel at the manifest's unit
+  function stepWindow(rel, n) {
+    const ref = manifestUnit(), j = Math.ceil(n * Math.log2(rel * ref) - 1e-6);
+    return [(Math.pow(2, (j - 1) / n) / ref) * (1 + 1e-5), Math.pow(2, j / n) / ref];
+  }
+  // Sprites a scene tweens to random sizes (foam and bubbles popping up while teeth are brushed): more
+  // than RANDOM_STEPS distinct 2^(1/8) steps in its list. Painted ahead at the steps seen; on another
+  // screen a random size can come out as any step (unpredictable), so their steps stand for no more.
+  const RANDOM_STEPS = 4;
+  function randomTweens(m) {
+    const n = new Map();
+    for (const e of m) if (e.length === 3 && e[2] === 8) n.set(e[0], (n.get(e[0]) || 0) + 1);
+    return new Set([...n].filter(([, c]) => c > RANDOM_STEPS).map(([id]) => id));
+  }
   function sceneList(name) {
     const m = typeof window !== 'undefined' && window.AT_SPRITES && window.AT_SPRITES.scenes[name];
-    const out = [];
+    const out = [], seen = new Set();
     if (!m) return out;
-    const u = unitScale();
+    const u = unitScale(), random = randomTweens(m);
+    const add = (id, k) => { const key = keyOf(id, k); if (!seen.has(key)) { seen.add(key); out.push([id, k]); } };
+    const every = (id, lo, hi, n) => {
+      const j1 = Math.ceil(n * Math.log2(hi * u) - 1e-6);
+      for (let j = Math.ceil(n * Math.log2(lo * u) - 1e-6); j <= j1; j++) add(id, round3(Math.pow(2, j / n)));
+    };
     for (const e of m) {
       const id = e[0];
       if (!sprites[id]) continue;
-      if (e.length === 2) out.push([id, round3(e[1] * u)]);
-      else if (e.length === 3) out.push([id, bucketUp(e[1] * u, e[2])]);
-      else if (e[3] > 0) {
-        const n = e[3], j1 = Math.ceil(n * Math.log2(e[2] * u) - 1e-6);
-        for (let j = Math.ceil(n * Math.log2(e[1] * u) - 1e-6); j <= j1; j++) out.push([id, round3(Math.pow(2, j / n))]);
-      }
+      if (e.length === 2) add(id, round3(e[1] * u));
+      else if (e.length === 3 && e[2] === 8 && random.has(id)) add(id, bucketUp(e[1] * u, 8));
+      else if (e.length === 3) every(id, stepWindow(e[1], e[2])[0], stepWindow(e[1], e[2])[1], e[2]);
+      else if (e[3] > 0) every(id, stepWindow(e[1], e[3])[0], stepWindow(e[2], e[3])[1], e[3]);
     }
     return out;
   }
@@ -1293,9 +1369,10 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     const out = [];
     // (not while recording what scenes ask for: tools/sprite-manifest.mjs)
     if (mode !== 'bitmap' || spriteLog) return out;
-    for (const [id, k] of sceneList(name)) {
-      const key = keyOf(id, k);
-      if (!(k >= 0.01) || cache.has(key) || failed.has(key)) continue;
+    for (const [id, k0] of sceneList(name)) {
+      if (!(k0 >= 0.01)) continue;
+      const k = nearK(id, k0), key = keyOf(id, k);
+      if (cache.has(key) || failed.has(key)) continue;
       const job = jobs.get(key);
       if (job && job.by.some((r) => r.tag === sceneTag)) { out.push([job.promise, job.px]); continue; } // (asked for already)
       if (!job) st.prefetched++;
@@ -1342,7 +1419,8 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     const step = (deadline) => {
       if (!tag.alive) return;
       while (list.length) {
-        const [id, k, key, big] = list[0];
+        const [id, k0, , big] = list[0];
+        const k = nearK(id, k0), key = keyOf(id, k);
         const off = offMain(id);
         const isSmall = off ? pxOf({ id, k }) <= IDLE_PX : estimate(id, k) <= SYNC_MS;
         if (cache.has(key) || jobs.has(key) || failed.has(key) || (big ? isSmall || !off : !isSmall)) { list.shift(); continue; }
@@ -1502,8 +1580,8 @@ ${ink('ks', 1.6, 1.6, 0.25)}
         if (kmaxOf(im) || underTween(im) || settling(im)) continue; // particles and tweens are handled apart
         const M0 = deviceMatrix(im, pass), raw = M0 ? scaleOf(M0) : 0, kd = round3(raw);
         if (!(kd >= 0.01)) continue;
-        if (kd > kb * 1.01) { note(im.dataset.sprite, raw, 32); if (!useCached(im, kd, pass)) ratchet(im, kd); }
-        else if (kb > kd * TRACK) { note(im.dataset.sprite, raw, 32); if (!useCached(im, kd, pass)) offer(im, kd); }
+        if (kd > kb * 1.01) { note(im.dataset.sprite, raw, 32, im); if (!useCached(im, kd, pass)) ratchet(im, kd); }
+        else if (kb > kd * TRACK) { note(im.dataset.sprite, raw, 32, im); if (!useCached(im, kd, pass)) offer(im, kd); }
         // A lone sprite pulsing in place (the Play button) whose bitmap happens to be at its exact
         // scale right now: on the pixel grid, it is shown exactly as painted (half a pixel off, it
         // would look blurred). Only for uniform scaling of a node holding just this sprite: puppet
@@ -1540,6 +1618,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   function offer(im, kd) {
     const id = im.dataset.sprite, kk = bucketUp(kd, 32), key = keyOf(id, kk);
     if (jobs.has(key) || failed.has(key)) return;
+    missed(id, kk, key, 'step');
     busy++;
     rasterize(id, kk, { im, prefetch: true, urgent: true }).then((e) => { // (the oscillation will need it in a few frames)
       if (!e || mode !== 'bitmap' || held || !im.isConnected || im.dataset.sprite !== id || underTween(im) || !byUrl.has(e.url)) return;
@@ -1602,7 +1681,9 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     const pass = new Map();
     const t = now();
     for (const im of root.querySelectorAll('img[data-sprite]')) {
-      if (kmaxOf(im) || underTween(im) || !im.isConnected) { im._atO = null; continue; } // particles and tweens are handled elsewhere
+      // particles and tweens are handled elsewhere; so is a tween that has just ended (its exact refit
+      // follows, unless another tween starts at once: a thought bubble bumping up, then shrinking away)
+      if (kmaxOf(im) || underTween(im) || settling(im) || !im.isConnected) { im._atO = null; continue; }
       const M = deviceMatrix(im, pass);
       if (!M) continue;
       const still = sameAt(im._atO, M);
@@ -1620,17 +1701,17 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       if (anim) {
         // a CSS animation (.hudbtn.pulse): the bitmap for its peak, SVG until that is ready
         im._atMoved = t;
-        note(id, raw, 0);
+        note(id, raw, 0, im);
         showAtLeast(im, kd);
       } else if (!kb) {
-        note(id, raw, 0);
+        note(id, raw, 0, im);
         if (!pending && !failed.has(keyOf(id, kd))) want(im, kd);
       } else if (kd > kb * 1.01) {
-        note(id, raw, 32);
+        note(id, raw, 32, im);
         if (!useCached(im, kd, pass)) ratchet(im, kd);
       } else if (!near(kb, kd) && prev && near(prev, kd) && !(t - lastMoved(im) < REST) && !invisible(im)) {
         // (a sprite nobody can see - opacity 0, display none - is settled once it is shown)
-        note(id, raw, 0);
+        note(id, raw, 0, im);
         if (!(pending && im._atWant === keyOf(id, kd))) want(im, kd);
       } else if (still) resnapOne(im, pass, M);
     }
@@ -1658,7 +1739,8 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       im._atO = null;
       const kb = +im.dataset.k || 0;
       if (!kb) continue;
-      const e = !underTween(im) && cache.get(keyOf(im.dataset.sprite, kWanted(im, pass)));
+      const kw = kWanted(im, pass);
+      const e = !underTween(im) && kw >= 0.01 && cache.get(keyOf(im.dataset.sprite, nearK(im.dataset.sprite, kw)));
       if (e) { im._atWant = e.key; apply(im, e, pass); continue; }
       const kd = animated(im, pass) ? kPeak(im) : kOf(im, pass);
       if (kb < kd / 1.01) { unapply(im); svg++; }
@@ -1728,9 +1810,10 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     const pass = new Map();
     for (const im of root.querySelectorAll('img[data-sprite]')) {
       if (underTween(im)) continue;
-      const k = round3(kWanted(im, pass));
-      const key = keyOf(im.dataset.sprite, k);
-      if (k >= 0.01 && !cache.has(key) && !failed.has(key) && !stored(im.dataset.sprite, k)) return false;
+      const k0 = round3(kWanted(im, pass));
+      if (!(k0 >= 0.01)) continue;
+      const k = nearK(im.dataset.sprite, k0), key = keyOf(im.dataset.sprite, k);
+      if (!cache.has(key) && !failed.has(key) && !stored(im.dataset.sprite, k)) return false;
     }
     return true;
   }
@@ -1741,9 +1824,10 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     let ms = 0;
     for (const im of root.querySelectorAll('img[data-sprite]')) {
       if (underTween(im)) continue;
-      const k = round3(kWanted(im, pass));
-      const key = keyOf(im.dataset.sprite, k);
-      if (!(k >= 0.01) || seen.has(key) || cache.has(key) || failed.has(key)) continue;
+      const k0 = round3(kWanted(im, pass));
+      if (!(k0 >= 0.01)) continue;
+      const k = nearK(im.dataset.sprite, k0), key = keyOf(im.dataset.sprite, k);
+      if (seen.has(key) || cache.has(key) || failed.has(key)) continue;
       seen.add(key);
       ms += estimate(im.dataset.sprite, k);
     }
@@ -1762,7 +1846,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       if (mode !== 'bitmap' || held || !el || !el.querySelectorAll || !el.isConnected) return;
       for (const im of el.querySelectorAll('img[data-sprite]')) {
         const M = peakMatrix(im);
-        note(im.dataset.sprite, M ? scaleOf(M) : 0, 0);
+        note(im.dataset.sprite, M ? scaleOf(M) : 0, 0, im);
         showAtLeast(im, kPeak(im));
       }
       checkIdle();
