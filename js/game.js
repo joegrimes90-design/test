@@ -61,6 +61,11 @@
     // Nothing under the cover paints while the scene is built and its sprite bitmaps
     // are painted (live SVG frames would compete with the baking for the CPU).
     E.stage.classList.add('covered');
+    // Live play: the clock stands still while the scene is built and painted behind the cover.
+    // (Sprites are painted off the main thread, so frames keep running meanwhile: the scene's
+    // animations would otherwise run on hidden, and oscillating sprites ask for new bitmaps.)
+    const stillWhileBuilding = !E.manual && !E.recording && !E.paused;
+    if (stillWhileBuilding) E.paused = true;
     E.newToken();
     AT.audio.stopVoice();
     voiceEnd = 0;
@@ -83,6 +88,7 @@
     const loading = document.getElementById('loading');
     if (loading) loading.remove();
     await AT.imagesReady(E.stage, 10000);
+    if (stillWhileBuilding) E.paused = false;
     E.stage.classList.remove('covered');
     mark(`at:built:${name}`);
     await E.fadeTo(0, 0.45);

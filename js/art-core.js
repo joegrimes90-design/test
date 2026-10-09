@@ -202,7 +202,8 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   function url(id) {
     const sp = sprites[id];
     if (!sp.url) {
-      const blobObj = new Blob([svgOf(id)], { type: 'image/svg+xml' });
+      sp.text = svgOf(id);
+      const blobObj = new Blob([sp.text], { type: 'image/svg+xml' });
       sp.url = URL.createObjectURL(blobObj);
     }
     return sp.url;
@@ -274,7 +275,8 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   const params = (() => { try { return new URLSearchParams(location.search); } catch (e) { return new URLSearchParams(''); } })();
   // test-only knobs (tests/visual/raster-parity.spec.mjs proves that broken variants fail;
   // budgetBytes lets tests/e2e force evictions; js/game.js reads refitCoverMs)
-  const tuning = Object.assign({ snap: true, resnap: true, boxSize: false, oversample: 1, budgetBytes: 0 }, (typeof window !== 'undefined' && window.__AT_RASTER_TUNING) || {});
+  // async: paint off the main thread where proven exact (?bake=sync turns it off)
+  const tuning = Object.assign({ snap: true, resnap: true, boxSize: false, oversample: 1, budgetBytes: 0, async: params.get('bake') !== 'sync' }, (typeof window !== 'undefined' && window.__AT_RASTER_TUNING) || {});
   let mode = params.get('raster') === 'svg' ? 'svg' : 'bitmap';
   const cache = new Map();      // `${id}@${k.toFixed(3)}` -> entry {key, id, k, url, blob, cw, ch, ms, bytes, decoded, used, pre}
   const byUrl = new Map();      // bitmap url -> entry
@@ -286,7 +288,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   const failed = new Set();     // keys that cannot be painted (too big, decode errors)
   const pendingFit = new Set(); // imgs created since the last microtask flush
   const idleWaiters = [];
-  const st = { jobs: 0, ms: 0, hits: 0, misses: 0, svgFallbacks: 0, bytes: 0, decoded: 0, evicted: 0, syncJobs: 0, dropped: 0, resnaps: 0 };
+  const st = { jobs: 0, ms: 0, hits: 0, misses: 0, svgFallbacks: 0, bytes: 0, decoded: 0, evicted: 0, syncJobs: 0, dropped: 0, resnaps: 0, asyncJobs: 0, asyncMs: 0, asyncFallbacks: 0 };
   const debug = params.get('debug') === '1';
   const SYNC_MS = 40; // a bitmap estimated to cost at most this may be painted on the spot (never inside an input event)
   let running = false, flushQueued = false, busy = 0, useClock = 0;
@@ -509,8 +511,11 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     const blob = new Blob([bytes], { type: 'image/png' });
     const ms = performance.now() - t0;
-    st.jobs++; st.ms += ms;
     learnMs += ms; learnPx += cw * ch;
+    return makeEntry(id, k, cw, ch, blob, ms);
+  }
+  function makeEntry(id, k, cw, ch, blob, ms) {
+    st.jobs++; st.ms += ms;
     // decoded: what it costs in memory once shown (the PNG bytes are a fraction of that)
     const entry = { key: keyOf(id, k), id, k, url: URL.createObjectURL(blob), blob, cw, ch, ms, bytes: blob.size, decoded: cw * ch * 4, used: ++useClock };
     // keep a decoded copy referenced so swapping the src is immediate
@@ -518,9 +523,185 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     entry.pre.src = entry.url;
     return entry;
   }
+
+  // ----- painting off the main thread (Chromium) -----
+  // Chromium rasterises createImageBitmap(<img> showing an SVG) on a background thread: the
+  // main thread only records the picture (about 1 ms, even for a background). A wrapper SVG of
+  // cw x ch draws the sprite's own SVG text as an <image> into (0, 0, w*k, h*k): the same
+  // source->destination map and the same recorded picture as drawImage(svg, 0, 0, w*k, h*k) in
+  // bake(), so the pixels are identical. (Putting the scale in a viewBox or a transform instead
+  // composes the matrices differently and changes a few edge pixels.) This is checked at boot on a
+  // probe (asyncCheck); sprites with rotated or skewed shapes stay on bake(), because their
+  // filters are resampled differently on that thread (teddy: up to 9 levels). The bitmap is
+  // PNG-encoded by a worker (OffscreenCanvas.convertToBlob), else by canvas.toBlob (idle time),
+  // so imgs keep PNG blob URLs exactly as before, and a persistent cache can store the same Blob.
+  // Up to ASYNC_MAX sprites are painted at once (in parallel on a multi-core device), within
+  // ASYNC_PX device pixels in flight (each in flight holds about 3 copies of 4 bytes per pixel).
+  const ASYNC_MAX = 4;
+  const ASYNC_PX = 12e6;
+  const ON_THREAD_DIFFERS = /rotate\(|skewX|skewY|matrix\(/;
+  let asyncReady = null; // Promise<boolean>: off-thread painting is exact here
+  let inflight = 0, inflightPx = 0, slotWake = null;
+  const loadImage = (src) => new Promise((resolve, reject) => {
+    const im = new Image();
+    im.onload = () => resolve(im);
+    im.onerror = () => reject(new Error('load'));
+    im.src = src;
+  }).then((im) => (im.decode ? im.decode().then(() => im, () => im) : im));
+  // w*k as an SVG length that the SVG parser reads as exactly float(w*k), which is what
+  // drawImage uses (the plain decimal of the double can come out one float step off: 112*1.297
+  // = 145.26400000000001 did, and changed 2 pixels); null if none does.
+  let lenProbe = null;
+  function exactLen(x) {
+    const f = Math.fround(x);
+    if (!lenProbe) lenProbe = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+    const cands = [String(f), f.toPrecision(9)];
+    for (let i = 0; i < cands.length; i++) {
+      lenProbe.setAttribute('width', cands[i]);
+      if (lenProbe.width.baseVal.value === f) return cands[i];
+    }
+    return null;
+  }
+  function wrapper(text, w, h, k, cw, ch) {
+    const lw = exactLen(w * k), lh = exactLen(h * k);
+    if (lw === null || lh === null) return null;
+    const s = '<svg xmlns="http://www.w3.org/2000/svg" width="' + cw + '" height="' + ch + '"><image href="data:image/svg+xml;charset=utf-8,' +
+      encodeURIComponent(text) + '" width="' + lw + '" height="' + lh + '" preserveAspectRatio="none"/></svg>';
+    return URL.createObjectURL(new Blob([s], { type: 'image/svg+xml' }));
+  }
+  // ImageBitmap of the SVG text painted at k (cw x ch), rasterised off the main thread
+  const SUPERSEDED = new Error('superseded');
+  function bitmapOf(text, w, h, k, cw, ch, wanted) {
+    const u = wrapper(text, w, h, k, cw, ch);
+    if (!u) return Promise.reject(new Error('length'));
+    const done = () => URL.revokeObjectURL(u);
+    let t0 = 0;
+    return loadImage(u).then((im) => {
+      if (wanted && !wanted()) throw SUPERSEDED; // (a resize or a newer request since it was queued)
+      t0 = performance.now();
+      return createImageBitmap(im);
+    }).then((bm) => {
+      done();
+      // (background raster time: an upper bound for painting it here, on the safe side for estimate())
+      learnMs += performance.now() - t0; learnPx += cw * ch;
+      if (bm.width !== cw || bm.height !== ch) { if (bm.close) bm.close(); throw new Error('size'); }
+      return bm;
+    }, (e) => { done(); throw e; });
+  }
+  // PNG Blob of an ImageBitmap (the bitmap is handed over: transferred or closed)
+  let encoder; // Worker | null (unavailable) | undefined (not tried yet)
+  let encSeq = 0;
+  const encWaits = new Map();
+  function encoderWorker() {
+    if (encoder !== undefined) return encoder;
+    encoder = null;
+    try {
+      // (?enc=toblob, and the one-file artifact bundle: its host's Content-Security-Policy may forbid
+      // blob: workers, and a refused worker logs a console error; tools/build-artifact.mjs sets AT_BUNDLE)
+      if (params.get('enc') === 'toblob' || window.AT_BUNDLE || typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined' || !OffscreenCanvas.prototype.convertToBlob) return null;
+      const src = 'onmessage=function(e){var m=e.data,c=new OffscreenCanvas(m.b.width,m.b.height);c.getContext("2d").drawImage(m.b,0,0);m.b.close();' +
+        'c.convertToBlob({type:"image/png"}).then(function(b){postMessage({id:m.id,blob:b})},function(){postMessage({id:m.id,blob:null})})}';
+      const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+      w.onmessage = (ev) => { const r = encWaits.get(ev.data.id); encWaits.delete(ev.data.id); if (r) r(ev.data.blob); };
+      w.onerror = (ev) => { if (ev && ev.preventDefault) ev.preventDefault(); encoder = null; encWaits.forEach((r) => r(null)); encWaits.clear(); };
+      encoder = w;
+    } catch (e) { encoder = null; }
+    return encoder;
+  }
+  function encodePng(bm) {
+    const w = encoderWorker();
+    if (w) {
+      return new Promise((resolve) => { const id = ++encSeq; encWaits.set(id, resolve); w.postMessage({ id, b: bm }, [bm]); })
+        .then((blob) => blob || Promise.reject(new Error('encode')));
+    }
+    const cv = document.createElement('canvas');
+    cv.width = bm.width; cv.height = bm.height;
+    cv.getContext('bitmaprenderer').transferFromImageBitmap(bm);
+    return new Promise((resolve, reject) => cv.toBlob((b) => (b ? resolve(b) : reject(new Error('encode'))), 'image/png'));
+  }
+  // Probe: a small drawing with every kind of wash and ink at a fractional scale, painted both ways.
+  function asyncCheck() {
+    if (asyncReady) return asyncReady;
+    asyncReady = (async () => {
+      if (mode !== 'bitmap' || !tuning.async || typeof createImageBitmap !== 'function' || typeof document === 'undefined') return false;
+      try {
+        const w = 60, h = 44, k = 1.493, cw = Math.ceil(w * k - 1e-6), ch = Math.ceil(h * k - 1e-6);
+        const shapes = [
+          { d: C(18, 22, 13), f: '#ef5b5b' },
+          { d: C(40, 20, 12), f: '#7cc4ea', fx: 't', o: 0.8 },
+          { d: R(4, 26, 52, 14, 5), f: '#ffd23f', fx: 'bg' },
+          { d: C(30, 14, 6), f: '#fff3b0', fx: 'ws', k: false },
+          { d: line([[6, 6], [30, 2], [54, 8]]), k: SEPIA, sw: 2, f: null },
+        ];
+        const text = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '">' + defs(7) + shapes.map(shapeSvg).join('') + '</svg>';
+        const u = URL.createObjectURL(new Blob([text], { type: 'image/svg+xml' }));
+        const svg = await loadImage(u);
+        const read = (src, f) => {
+          const cv = document.createElement('canvas');
+          cv.width = cw; cv.height = ch;
+          const g = cv.getContext('2d', { willReadFrequently: true });
+          f(g, src);
+          return g.getImageData(0, 0, cw, ch).data;
+        };
+        const a = read(svg, (g, s) => g.drawImage(s, 0, 0, w * k, h * k));
+        URL.revokeObjectURL(u);
+        const bm = await bitmapOf(text, w, h, k, cw, ch);
+        const b = read(bm, (g, s) => g.drawImage(s, 0, 0));
+        let alpha = 0;
+        for (let i = 0; i < a.length; i++) { if (a[i] !== b[i]) { if (bm.close) bm.close(); return false; } if ((i & 3) === 3) alpha += a[i]; }
+        // try the encoder worker once here (a CSP may forbid blob: workers): canvas.toBlob if it fails
+        if (encoderWorker()) { const blob = await encodePng(bm).catch(() => null); if (!blob) encoder = null; } else if (bm.close) bm.close();
+        return alpha > 0; // (and something was painted)
+      } catch (e) { return false; }
+    })();
+    return asyncReady;
+  }
+  const offThread = (id) => !ON_THREAD_DIFFERS.test(sprites[id].text || (sprites[id].text = svgOf(id)));
+  function bakeAsync(id, k, wanted) {
+    const sp = sprites[id];
+    const w = sp.box[2], h = sp.box[3];
+    const cw = Math.ceil(w * k - 1e-6), ch = Math.ceil(h * k - 1e-6);
+    if (cw < 1 || ch < 1 || cw * ch > MAX_PX) return Promise.reject(new Error('size')); // (bake() decides)
+    const t0 = performance.now();
+    return bitmapOf(sp.text, w, h, k, cw, ch, wanted).then((bm) => {
+      if (wanted && !wanted()) { if (bm.close) bm.close(); throw SUPERSEDED; }
+      return encodePng(bm);
+    }).then((blob) => {
+      const ms = performance.now() - t0;
+      st.asyncJobs++; st.asyncMs += ms;
+      return makeEntry(id, k, cw, ch, blob, ms);
+    });
+  }
+  const pxOf = (job) => { const b = sprites[job.id].box; return Math.ceil(b[2] * job.k) * Math.ceil(b[3] * job.k); };
+  const slot = () => new Promise((resolve) => { slotWake = resolve; });
+  function startAsync(job, px) {
+    inflight++; inflightPx += px;
+    // superseded jobs (nobody wants them any more, e.g. after a resize) stop before painting or encoding
+    bakeAsync(job.id, job.k, () => mode === 'bitmap' && stillWanted(job))
+      .then((e) => (e ? e.pre.decode().catch(() => {}).then(() => e) : null))
+      .catch((err) => { if (err === SUPERSEDED) return null; st.asyncFallbacks++; return 'sync'; })
+      .then((e) => {
+        if (e !== 'sync') return e;
+        // (worker gone, decode error...): paint it here instead
+        return runJob(job);
+      })
+      .then((e) => {
+        if (e && mode === 'bitmap') store(e);
+        else if (!e && !failed.has(job.key)) st.dropped++;
+        jobs.delete(job.key);
+        job.resolve(e && mode === 'bitmap' ? e : null);
+      })
+      .finally(() => {
+        inflight--; inflightPx -= px;
+        const w = slotWake; slotWake = null;
+        if (w) w();
+        checkIdle();
+      });
+  }
   // Does anyone still want this job's bitmap? (A resize or a new request may have
   // superseded it while it waited, or its img may be gone: then it is not painted.)
-  const stillWanted = (job) => job.direct || job.by.some((r) => r.im.isConnected && (r.prefetch || r.im._atWant === job.key));
+  // (prefetches for the old scale are dropped while a resize refit is pending)
+  const stillWanted = (job) => job.direct || job.by.some((r) => r.im.isConnected && ((r.prefetch && !held) || r.im._atWant === job.key));
   async function runJob(job) {
     if (!stillWanted(job)) return null;
     const svg = await svgImage(job.id);
@@ -581,9 +762,28 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     running = true;
     try {
       await selfCheck();
-      while (queue.length) {
-        const job = queue.shift();
+      const useAsync = await asyncCheck();
+      for (;;) {
+        if (!queue.length) { if (!inflight) break; await slot(); continue; }
+        // sprites whose scale changes every frame (checkScales: a ratchet shows it magnified until its
+        // bitmap arrives; an offer is the step it needs in a few frames) go first, painted here: the
+        // background round trip (tens of ms, longer behind big jobs) would show them magnified for frames
+        const u = queue.findIndex((j) => j.by.some((r) => r.urgent));
+        if (u > 0) queue.unshift(queue.splice(u, 1)[0]);
+        const job = queue[0];
+        const urgent = u >= 0;
         let entry = cache.get(job.key) || null; // painted meanwhile (by a tween)
+        if (!entry && mode === 'bitmap' && useAsync && !urgent && offThread(job.id)) {
+          const px = pxOf(job);
+          if (inflight >= ASYNC_MAX || (inflight && inflightPx + px > ASYNC_PX)) { await slot(); continue; }
+          queue.shift();
+          if (stillWanted(job)) { startAsync(job, px); continue; }
+          st.dropped++;
+          jobs.delete(job.key);
+          job.resolve(null);
+          continue;
+        }
+        queue.shift();
         if (!entry && mode === 'bitmap') {
           try { entry = await runJob(job); } catch (e) { entry = null; }
           if (entry) store(entry);
@@ -611,6 +811,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       job.promise = new Promise((resolve) => { job.resolve = resolve; });
       jobs.set(key, job);
       queue.push(job);
+      if (slotWake) { const w = slotWake; slotWake = null; w(); } // (pump may be waiting for a free slot)
       pump();
     }
     if (by) job.by.push(by); else job.direct = true;
@@ -666,7 +867,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   // Ask for the bitmap of im's sprite at scale k: applied now when cached, else when painted
   // (defer: painted but left for a later fit to put in, e.g. all at once after a resize).
   // Returns null (nothing to wait for) or a promise.
-  function want(im, k, defer) {
+  function want(im, k, defer, urgent) {
     const id = im.dataset.sprite;
     if (tuning.oversample !== 1) k = round3(k * tuning.oversample);
     if (!sprites[id] || !(k >= 0.01) || !isFinite(k)) return null;
@@ -676,8 +877,14 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     if (hit) { st.hits++; apply(im, hit); return null; }
     st.misses++;
     busy++;
-    return rasterize(id, k, { im }).then((entry) => {
-      if (!defer && entry && im._atWant === key && mode === 'bitmap' && im.dataset.sprite === id && byUrl.has(entry.url)) apply(im, entry);
+    return rasterize(id, k, { im, urgent: !!urgent }).then((entry) => {
+      if (!defer && entry && im._atWant === key && mode === 'bitmap' && im.dataset.sprite === id && byUrl.has(entry.url)) {
+        // painted for the scale it had when asked (off the main thread that can be some frames ago):
+        // if it has grown since (a pulse), it would be shown magnified: ask for the step above instead
+        const kd = held || underTween(im) ? 0 : kWanted(im);
+        if (kd > entry.k * 1.01) { ratchet(im, kd); return; }
+        apply(im, entry);
+      }
     }).finally(() => { busy--; checkIdle(); });
   }
   // the smallest cached bitmap of sprite id with lo <= k <= hi
@@ -908,13 +1115,13 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     const kk = bucketUp(kd, 32);
     const key = keyOf(im.dataset.sprite, kk);
     if (im._atWant === key && jobs.has(key)) return;
-    want(im, kk);
+    want(im, kk, false, true); // (shown magnified until it is painted: painted next, here)
   }
   function offer(im, kd) {
     const id = im.dataset.sprite, kk = bucketUp(kd, 32), key = keyOf(id, kk);
     if (jobs.has(key) || failed.has(key)) return;
     busy++;
-    rasterize(id, kk, { im, prefetch: true }).then((e) => {
+    rasterize(id, kk, { im, prefetch: true, urgent: true }).then((e) => { // (the oscillation will need it in a few frames)
       if (!e || mode !== 'bitmap' || held || !im.isConnected || im.dataset.sprite !== id || underTween(im) || !byUrl.has(e.url)) return;
       const kdNow = kOf(im), kbNow = +im.dataset.k || 0;
       if (kbNow && e.k >= kdNow / 1.01 && (kbNow < kdNow / 1.01 || kbNow > kdNow * TRACK)) { im._atWant = key; apply(im, e); }

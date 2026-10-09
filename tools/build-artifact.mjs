@@ -21,5 +21,7 @@ const scripts = [...html.slice(scriptsAt).matchAll(/<script(?: src="([^"]+)")?>(
   return `<script>\n${code}\n</script>`;
 });
 fs.mkdirSync(out, { recursive: true });
-fs.writeFileSync(path.join(out, 'atticus.html'), `${title}\n<style>\n${css}\n</style>\n${body}\n${scripts.join('\n')}\n`);
+// AT_BUNDLE: js/art-core.js then PNG-encodes without a blob: worker (the artifact host's
+// Content-Security-Policy may forbid those, and a refused worker logs a console error)
+fs.writeFileSync(path.join(out, 'atticus.html'), `${title}\n<style>\n${css}\n</style>\n${body}\n<script>window.AT_BUNDLE = true;</script>\n${scripts.join('\n')}\n`);
 console.log('wrote', path.join(out, 'atticus.html'), Math.round(fs.statSync(path.join(out, 'atticus.html')).size / 1024) + ' KB');
