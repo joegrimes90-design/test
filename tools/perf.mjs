@@ -2,11 +2,20 @@
 //   node tools/perf.mjs [--cpu 4] [--runs 3] [--json out.json] [--dpr 2] [--page /index.html]
 //                       [--scenes] [--revisit] [--trace] [--play] [--play-cap 45000] [--play-speed 2]
 //                       [--title-frames 120] [--scene-frames 60] [--title-cap 12000] [--scene-cap 5000]
-//                       [--net 1600,150]
+//                       [--net 1600,150] [--slow 4]
 //
-// Opens index.html in headless Chromium with the CPU slowed down (like a
-// tablet), and reports how long it takes to reach each milestone (ms after
-// navigation start unless noted):
+// Opens index.html in headless Chromium and reports how long it takes to reach each milestone
+// (ms after navigation start unless noted). Two ways to slow it down:
+//   --cpu N    CDP CPU throttling (Emulation.setCPUThrottlingRate): slows the page's main thread
+//              only. Rasterising on the browser's worker threads, createImageBitmap (where the
+//              sprites are painted) and Workers (where they are PNG-encoded) run at full speed,
+//              so this is NOT a model of a slow device for the painting: it guards the main
+//              thread's share of the work.
+//   --slow N   every process of the browser, so every thread, runs 1/N of the time (stopped and
+//              resumed with SIGSTOP/SIGCONT in 10 ms slices while a load is measured): a device N
+//              times slower per core, with this machine's number of cores. Needs no privileges
+//              (POSIX signals; /proc or ps). Frames come in bursts at the slice rate: frame times
+//              are not those of a real device, load and transition times are.
 //   titleShown      the title has faded in (game mark at:shown:title)
 //   titlePainted    the faded-in title is on screen: two animation frames after titleShown
 //                   (at:painted:title, marked in the page so Playwright round trips don't count),
@@ -22,8 +31,10 @@
 //   voiceAudio      when the narration audio arrived (at:voice: js/voice-data.js, loaded after
 //                   boot, has run); waited for up to 30 s after the rest is measured
 //   bitmapsPainted  sprite bitmaps painted in the whole run (bitmapsOffThread of them off the main
-//                   thread; paintedInPlay while a scene was played rather than behind its cover;
-//                   bitmapsStored taken from the bitmaps an earlier visit stored, storeLoadMs to read them)
+//                   thread; paintedInPlay asked for while a scene was played and not painted ahead: not
+//                   in its manifest; paintedRandom: random sizes no manifest can list; paintedLate:
+//                   listed but still being painted; bitmapsStored taken from the bitmaps an earlier
+//                   visit stored, storeLoadMs to read them)
 // --page     the page to load; --page /dist/atticus.html measures the one-file artifact
 //            bundle (rebuilt first with tools/build-artifact.mjs).
 // --net kbps,rtt  emulates a network (download kbit/s, round trip ms) and serves text
@@ -31,9 +42,13 @@
 // --scenes   then visits hub, potty, teeth, baby, tv and party with AT.go and reports, per
 //            scene, the phases faded/dom/raster/built/shown/painted relative to the AT.go call
 //            and the scene's frame p50/p95 (up to --scene-frames intervals or --scene-cap ms).
-//            transitionMax = the slowest scene's shown.
+//            transitionMax = the slowest scene's shown. lift = built to shown: from the cover
+//            lifting (the stage uncovered, fading in) to the scene playing; liftMax the slowest.
 // --revisit  every run uses a fresh persistent profile: loads the page (cold.*), then loads it
-//            again in the same profile (revisit.*), so persistent caches count.
+//            again in the same profile (revisit.*), so persistent caches count. Before the reload
+//            it waits (up to 20 s) for the game's own idle-time writes to the bitmap store to
+//            finish: cold.storeWrites records written that way, cold.storeForced records it had
+//            to flush by hand (0 when the production path works).
 // --trace    1 s after the title is painted, records a 3 s Chromium trace and reports
 //            rasterMsPerFrame: tile-raster time on the raster worker threads per frame drawn.
 // --play     then plays potty and teeth on the real clock (at --play-speed, for up to
@@ -89,6 +104,59 @@ await new Promise((r) => server.listen(0, r));
 const base = `http://localhost:${server.address().port}`;
 
 const LAUNCH = { args: ['--autoplay-policy=no-user-gesture-required'] };
+// --slow N: every process of the browser (and so every thread: the page's, the raster workers',
+// the Workers') is stopped (SIGSTOP) for N-1 slices of every N, in 10 ms slices, like cpulimit.
+// Unlike CDP throttling this slows the off-thread painting too; unlike a cgroup quota it needs no
+// privileges, and the browser keeps as many cores as the machine has (a device N times slower per
+// core). Frames come in bursts at the slice rate, so frame times are not comparable to a real device.
+const SLOW = +arg('slow', 1);
+// the processes this script has started (the browser and its children), from /proc or ps
+function childPids() {
+  const kids = new Map();
+  const add = (pid, ppid) => { if (!kids.has(ppid)) kids.set(ppid, []); kids.get(ppid).push(pid); };
+  if (fs.existsSync('/proc/self/stat')) {
+    for (const d of fs.readdirSync('/proc')) {
+      if (!/^\d+$/.test(d)) continue;
+      try { const s = fs.readFileSync(`/proc/${d}/stat`, 'utf8'); add(+d, +s.slice(s.lastIndexOf(')') + 2).split(' ')[1]); } catch (e) { /* exited */ }
+    }
+  } else {
+    for (const l of execFileSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8' }).trim().split('\n')) { const [pid, ppid] = l.trim().split(/\s+/).map(Number); add(pid, ppid); }
+  }
+  const out = [process.pid];
+  for (let i = 0; i < out.length; i++) for (const c of kids.get(out[i]) || []) out.push(c);
+  return out.slice(1);
+}
+let slowed = [];
+const signalAll = (pids, sig) => { for (const p of pids) { try { process.kill(p, sig); } catch (e) { /* exited */ } } };
+const resumeAll = () => signalAll(slowed, 'SIGCONT');
+process.on('exit', resumeAll);
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { resumeAll(); process.exit(130); });
+function slowDown(n) {
+  if (!(n > 1)) return () => {};
+  const RUN = 10;
+  let on = true, done = false, timer = null, last = performance.now(), ran = 0, paused = 0, ticks = 0;
+  const tick = () => {
+    if (done) return;
+    const now = performance.now();
+    if (on) {
+      ran += now - last;
+      if (ticks++ % 10 === 0) slowed = childPids(); // (new renderers and helpers)
+      signalAll(slowed, 'SIGSTOP');
+      on = false;
+      // stopped N-1 times as long as it ran, on average (timers are late by a millisecond or so)
+      timer = setTimeout(tick, Math.max(1, Math.min(4 * RUN * (n - 1), ran * (n - 1) - paused)));
+    } else {
+      paused += now - last;
+      signalAll(slowed, 'SIGCONT');
+      on = true;
+      timer = setTimeout(tick, RUN);
+    }
+    last = now;
+  };
+  slowed = childPids();
+  timer = setTimeout(tick, RUN);
+  return () => { done = true; clearTimeout(timer); resumeAll(); };
+}
 const CONTEXT = { viewport: { width: 1280, height: 720 }, deviceScaleFactor: DPR };
 const browser = REVISIT ? null : await chromium.launch(LAUNCH);
 const median = (a) => { const s = a.filter((v) => v != null).sort((x, y) => x - y); return s.length ? s[Math.floor(s.length / 2)] : null; };
@@ -225,8 +293,13 @@ async function playScene(page, name) {
   }, [name, actions]);
 }
 
-// One load of the page in `page`, measured up to the painted title (and beyond, with flags).
+// One load of the page in `page`, measured up to the painted title (and beyond, with flags);
+// with --slow, the whole browser slowed down meanwhile.
 async function measureLoad(page, cdp, opts = {}) {
+  const resume = slowDown(SLOW);
+  try { return await measureLoad1(page, cdp, opts); } finally { resume(); }
+}
+async function measureLoad1(page, cdp, opts = {}) {
   await cdp.send('Emulation.setCPUThrottlingRate', { rate: CPU });
   await page.goto(base + PAGE, { waitUntil: 'commit' });
   await page.waitForFunction(() => performance.getEntriesByName('at:painted:title').length > 0, null, { timeout: 180000, polling: 50 });
@@ -263,13 +336,16 @@ async function measureLoad(page, cdp, opts = {}) {
         AT.go(name);
         await new Promise((ok) => { const chk = () => (count() > before ? ok() : setTimeout(chk, 20)); chk(); });
         const rel = (n) => { const e = performance.getEntriesByName(`at:${n}:${name}`).pop(); return e && e.startTime >= t0 ? Math.round(e.startTime - t0) : null; };
-        return { faded: rel('faded'), dom: rel('dom'), raster: rel('raster'), built: rel('built'), shown: rel('shown'), painted: rel('painted') };
+        const r = { faded: rel('faded'), dom: rel('dom'), raster: rel('raster'), built: rel('built'), shown: rel('shown'), painted: rel('painted') };
+        r.lift = r.built != null && r.shown != null ? r.shown - r.built : null;
+        return r;
       }, sc);
       const sf = await sampleFrames(page, SCENE_FRAMES, SCENE_CAP);
       if (sf) { t.frameP50 = sf.p50; t.frameP95 = sf.p95; }
       r.scenes[sc] = t;
     }
     r.transitionMax = Math.max(...Object.values(r.scenes).map((s) => s.shown ?? Infinity));
+    r.liftMax = Math.max(...Object.values(r.scenes).map((s) => s.lift ?? Infinity));
     const fp = Object.values(r.scenes).map((s) => s.frameP95).filter((v) => v != null);
     r.sceneFrameP95 = fp.length ? Math.max(...fp) : null;
   }
@@ -307,7 +383,7 @@ async function measureLoad(page, cdp, opts = {}) {
   // and taken from the bitmaps stored on an earlier visit
   Object.assign(r, await page.evaluate(() => {
     const a = AT.art.stats(), c = AT.rasterCache ? AT.rasterCache.stats() : {};
-    return { bitmapsPainted: a.jobs, bitmapsOffThread: a.asyncJobs, paintedInPlay: a.playMisses, bitmapsStored: a.stored == null ? null : a.stored, storeLoadMs: c.loadMs == null ? null : c.loadMs };
+    return { bitmapsPainted: a.jobs, bitmapsOffThread: a.asyncJobs, paintedInPlay: a.playMisses, paintedRandom: a.playRandom, paintedLate: a.playLate, bitmapsStored: a.stored == null ? null : a.stored, storeLoadMs: c.loadMs == null ? null : c.loadMs };
   }));
   // when the narration audio (js/voice-data.js, loaded after boot) arrived; on a slow
   // --net it can arrive after the title, so wait a little for it
@@ -340,9 +416,18 @@ async function oneRun() {
       const { cdp, errors } = await setupPage(ctx, page);
       const cold = await measureLoad(page, cdp);
       cold.errors = errors.length;
-      // the bitmaps painted so far are stored when the browser is idle after each scene; make sure
-      // the last ones are written before reloading (a page being unloaded may lose its last write)
-      await page.evaluate(() => (window.AT && AT.rasterCache ? AT.rasterCache.flush() : null));
+      // the bitmaps painted so far are stored by the game when the browser is idle after each scene
+      // (and once a scene's manifest is painted): wait for those writes, then (only if that timed out)
+      // write what is left by hand, so the reload measures a full store either way
+      Object.assign(cold, await page.evaluate(async () => {
+        const c = window.AT && AT.rasterCache;
+        if (!c) return {};
+        const t0 = performance.now();
+        while (c.stats().busy && performance.now() - t0 < 20000) await new Promise((r) => setTimeout(r, 100));
+        const written = c.stats().writes, left = c.stats().pending;
+        if (left) await c.flush();
+        return { storeWrites: written, storeForced: left };
+      }));
       const revisit = await measureLoad(page, cdp);
       revisit.errors = errors.length - cold.errors;
       await ctx.close();
@@ -363,9 +448,9 @@ async function oneRun() {
 const KEYS = ['fcp', 'domContentLoaded', 'boot', 'warm', 'titleBuilt', 'titleShown', 'titlePainted', 'titleLcp', 'titleLive', 'titleFrame',
   'frameP50', 'frameP95', 'rasterMsPerFrame', 'longTasks', 'longTaskMs', 'maxLongTask', 'maxLongTaskIdle', 'longTaskIdleMs',
   'maxLongTaskPlay', 'longTaskPlayMs', 'playFrameP95', 'transitionMax', 'sceneFrameP95', 'scriptSec', 'taskSec', 'heapMB', 'voiceAudio',
-  'bitmapsPainted', 'bitmapsOffThread', 'paintedInPlay', 'bitmapsStored', 'storeLoadMs', 'errors'];
+  'bitmapsPainted', 'bitmapsOffThread', 'paintedInPlay', 'paintedRandom', 'paintedLate', 'bitmapsStored', 'storeLoadMs', 'liftMax', 'storeWrites', 'storeForced', 'errors'];
 const PLAY_KEYS = ['sec', 'actions', 'gameClock', 'frameP50', 'frameP95', 'frameMax', 'maxLongTask', 'longTaskMs', 'longTasks'];
-const SCENE_KEYS = ['faded', 'dom', 'raster', 'built', 'shown', 'painted', 'frameP50', 'frameP95'];
+const SCENE_KEYS = ['faded', 'dom', 'raster', 'built', 'shown', 'lift', 'painted', 'frameP50', 'frameP95'];
 function summarise(runs) {
   const s = {};
   for (const k of KEYS) { const v = median(runs.map((r) => r[k])); if (v != null) s[k] = v; }
@@ -393,7 +478,7 @@ for (let i = 0; i < RUNS; i++) {
   const c = r.cold || r;
   console.error(`run ${i + 1}: title shown at ${c.titleShown} ms, painted at ${c.titlePainted} ms${r.revisit ? `; revisit shown at ${r.revisit.titleShown} ms` : ''}${c.frameP95 != null ? `; frames p95 ${c.frameP95} ms` : ''}${c.rasterMsPerFrame != null ? `; raster ${c.rasterMsPerFrame} ms/frame` : ''}${c.voiceAudio != null ? `; voice audio at ${c.voiceAudio} ms` : ''}`);
 }
-const summary = { cpuThrottle: CPU, runs: RUNS, page: PAGE, dpr: DPR, ...(NET ? { net: { kbps: NET[0], rttMs: NET[1] } } : {}) };
+const summary = { cpuThrottle: CPU, runs: RUNS, page: PAGE, dpr: DPR, ...(NET ? { net: { kbps: NET[0], rttMs: NET[1] } } : {}), ...(SLOW > 1 ? { slow: SLOW } : {}) };
 if (REVISIT) {
   summary.cold = summarise(runs.map((r) => r.cold));
   summary.revisit = summarise(runs.map((r) => r.revisit));

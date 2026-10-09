@@ -1,5 +1,5 @@
 {
-  "_comment": "Budgets for npm run perf (milliseconds; headless Chromium, 1280x720 at deviceScaleFactor 2; see tests/perf/check.mjs for the configurations). titlePainted = navigation start to the title on screen (two animation frames after it is shown, or its largest-contentful-paint if later: a cold first visit shows it still, as plain SVG, while its bitmaps are painted); titleLive = the title animating with all its bitmaps; frameP95 = 95th percentile rAF interval on the animated title (16.7 = 60 fps); rasterMsPerFrame = tile raster on the worker threads per frame on the idle title (from a trace); maxLongTaskPlay = longest main-thread task while playing potty and teeth on the real clock with the auto-player (--play), outside AT.go transitions; playFrameP95 = the worst played scene's rAF p95; transitionMax = slowest AT.go to fully faded in, over hub, potty, teeth, baby, tv and party (each scene's own limit under scenes: 2.5 s, potty 3.5 s: its manifest, the hand-washing close-up included, is painted behind its cover); sceneFrameP95 = the worst scene's rAF p95 just after it is shown. revisit*: the second load in the same profile, bitmaps from IndexedDB.",
+  "_comment": "Budgets for npm run perf (milliseconds; headless Chromium, 1280x720 at deviceScaleFactor 2; see tests/perf/check.mjs for the configurations). titlePainted = navigation start to the title on screen (two animation frames after it is shown, or its largest-contentful-paint if later: a cold first visit shows it still, as plain SVG, while its bitmaps are painted); titleLive = the title animating with all its bitmaps; frameP95 = 95th percentile rAF interval on the animated title (16.7 = 60 fps); rasterMsPerFrame = tile raster on the worker threads per frame on the idle title (from a trace); maxLongTaskPlay = longest main-thread task while playing potty and teeth on the real clock with the auto-player (--play), outside AT.go transitions; playFrameP95 = the worst played scene's rAF p95; transitionMax = slowest AT.go to fully faded in, over hub, potty, teeth, baby, tv and party (each scene's own limit under scenes: 2.5 s, potty 3.5 s: its manifest's big bitmaps, the hand-washing close-up included, are painted behind its cover); liftMax = the slowest scene's cover lift (the stage uncovered, fading in) to the scene playing (at:shown): it plays as soon as it has faded in, whatever of its manifest is still being painted; sceneFrameP95 = the worst scene's rAF p95 just after it is shown. cpu4 is CDP CPU throttling, which slows the page's main thread only: the sprites are painted on the browser's worker threads (createImageBitmap) and PNG-encoded in a Worker, neither of which it slows, so cpu4 guards the main thread's share of loading and is not a model of a slow device (its titlePainted and titleLive are therefore not comparable with the main-thread baking that came before, and say nothing about a real slow tablet). slowAll slows every thread 4x (tools/perf.mjs --slow 4); its numbers are in the stretch block. revisit*: the second load in the same profile, bitmaps from IndexedDB.",
   "noThrottle": {
     "titlePainted": 2500,
     "titleLive": 3500,
@@ -8,6 +8,7 @@
     "maxLongTaskPlay": 150,
     "playFrameP95": 25,
     "transitionMax": 3500,
+    "liftMax": 800,
     "sceneFrameP95": 25,
     "scenes": {
       "hub": {
@@ -33,7 +34,8 @@
   "cpu4": {
     "titlePainted": 4000,
     "titleLive": 6100,
-    "frameP95": 25
+    "frameP95": 25,
+    "liftMax": 1000
   },
   "revisit": {
     "titleShown": 1200,
@@ -44,7 +46,7 @@
     "titleShown": 2500
   },
   "stretch": {
-    "_comment": "Printed, never fails. titleShown on a cold visit is reached by the still preview (titlePainted and titleLive are the cold load budgets). maxLongTask = the longest main-thread task anywhere, loading included; maxLongTaskIdle = the longest task in idle frames (the title and freshly entered scenes, nobody playing).",
+    "_comment": "Printed, never fails. titleShown on a cold visit is reached by the still preview (titlePainted and titleLive are the cold load budgets). maxLongTask = the longest main-thread task anywhere, loading included; maxLongTaskIdle = the longest task in idle frames (the title and freshly entered scenes, nobody playing). slowAll: the cpu4 load targets (title painted 4 s, live 6.1 s) with every thread slowed 4x, the off-thread painting included: what a device four times slower per core would see. Not met yet (see README).",
     "noThrottle": {
       "titleShown": 1000,
       "maxLongTask": 150,
@@ -53,6 +55,11 @@
     "cpu4": {
       "titleShown": 2500,
       "maxLongTask": 500
+    },
+    "slowAll": {
+      "titlePainted": 4000,
+      "titleLive": 6100,
+      "transitionMax": 3500
     },
     "revisit": {
       "maxLongTask": 150

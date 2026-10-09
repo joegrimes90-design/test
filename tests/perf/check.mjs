@@ -1,15 +1,22 @@
 // Load-performance budget check:  npm run perf  [-- --runs 3] [--update-baseline] [--only noThrottle,cpu4]
 //
-// Runs tools/perf.mjs in three configurations and prints the numbers next to
+// Runs tools/perf.mjs in five configurations and prints the numbers next to
 // tests/perf/budget.json and tests/perf/baseline.json; exits 1 if a budgeted
 // metric is over budget (the 'stretch' block is printed but never fails):
 //   noThrottle  no CPU throttle, with --scenes (transition phases, per-scene frames),
 //               --trace (tile raster ms per frame on the idle title) and --play (potty
 //               and teeth played on the real clock: long tasks and frames while playing)
-//   cpu4        4x CPU throttle, like a tablet
+//   cpu4        CDP 4x throttle of the page's main thread only, with --scenes. The sprites
+//               are painted on the browser's worker threads (createImageBitmap) and encoded
+//               in a Worker, neither of which CDP slows: this guards the main thread's share
+//               of the work, and is not a model of a slow device.
+//   slowAll     every thread slowed 4x (--slow 4: the whole browser stopped 3/4 of the time,
+//               in 10 ms slices), with --scenes: the painting is slowed too, so this is the
+//               model of a slow device for loading (frame times come in slices: not meaningful).
+//               Its targets are in the stretch block: printed, never failing.
 //   revisit     no throttle, a persistent profile loaded twice (--revisit): the second
 //               load (revisit.*) is what a returning player sees (sprite bitmaps from IndexedDB)
-//   revisitCpu4 the same at 4x CPU throttle
+//   revisitCpu4 the same with the CDP 4x main-thread throttle
 // A budget block may hold `scenes: {hub: {shown: 2500}, ...}`: per-scene limits on the
 // --scenes phases (ms after AT.go).
 // Not part of `npm test`: timings are noisy and it takes several minutes.
@@ -30,7 +37,8 @@ const baseline = fs.existsSync(baselineFile) ? JSON.parse(fs.readFileSync(baseli
 // name -> [perf.mjs args, key of the result object to read (null = top level)]
 const ALL = {
   noThrottle: [['--cpu', '1', '--scenes', '--trace', '--play'], null],
-  cpu4: [['--cpu', '4'], null],
+  cpu4: [['--cpu', '4', '--scenes', '--scene-frames', '30'], null],
+  slowAll: [['--cpu', '1', '--slow', '4', '--scenes', '--title-frames', '0', '--scene-frames', '0'], null],
   // frames are measured by the other two; here only load and transition times matter
   revisit: [['--cpu', '1', '--revisit', '--scenes', '--title-frames', '0', '--scene-frames', '0'], 'revisit'],
   revisitCpu4: [['--cpu', '4', '--revisit', '--title-frames', '0'], 'revisit'],
@@ -52,15 +60,20 @@ for (const [name, [args, key]] of Object.entries(CONFIGS)) {
 }
 
 const METRICS = ['titleShown', 'titlePainted', 'titleLcp', 'titleLive', 'frameP50', 'frameP95', 'rasterMsPerFrame', 'maxLongTaskPlay',
-  'playFrameP95', 'maxLongTaskIdle', 'transitionMax', 'sceneFrameP95', 'warm', 'voiceAudio', 'fcp', 'longTaskMs', 'maxLongTask',
-  'bitmapsPainted', 'paintedInPlay', 'bitmapsStored', 'heapMB', 'errors'];
+  'playFrameP95', 'maxLongTaskIdle', 'transitionMax', 'liftMax', 'sceneFrameP95', 'warm', 'voiceAudio', 'fcp', 'longTaskMs', 'maxLongTask',
+  'bitmapsPainted', 'paintedInPlay', 'paintedRandom', 'paintedLate', 'bitmapsStored', 'heapMB', 'errors'];
+const NOTES = {
+  cpu4: 'CDP throttles the main thread only: the painting (worker threads, createImageBitmap, the encoder Worker) runs at full speed',
+  slowAll: 'every process of the browser stopped 3/4 of the time: every thread, the painting included, 4x slower',
+};
 const fails = [];
 const fmt = (v) => (v == null ? '-' : String(v));
 for (const name of Object.keys(CONFIGS)) {
   const b = budget[name] || {};
   const st = (budget.stretch && budget.stretch[name]) || {};
   const m = measured[name];
-  console.log(`\n${name} (median of ${RUNS} runs)`);
+  if (!m) continue;
+  console.log(`\n${name} (median of ${RUNS} runs)${NOTES[name] ? `\n  (${NOTES[name]})` : ''}`);
   console.log(`  ${'metric'.padEnd(16)}${'now'.padStart(9)}${'budget'.padStart(9)}${'baseline'.padStart(10)}`);
   for (const k of METRICS) {
     const v = m[k];
@@ -74,7 +87,7 @@ for (const name of Object.keys(CONFIGS)) {
     console.log(`  ${k.padEnd(16)}${fmt(v).padStart(9)}${fmt(lim).padStart(9)}${fmt(base).padStart(10)}${verdict}`);
   }
   if (m.scenes) {
-    const cols = ['faded', 'dom', 'raster', 'built', 'shown', 'painted', 'frameP50', 'frameP95'];
+    const cols = ['faded', 'dom', 'raster', 'built', 'shown', 'lift', 'painted', 'frameP50', 'frameP95'];
     console.log(`  per scene (ms after AT.go):\n    ${'scene'.padEnd(8)}${cols.map((c) => c.padStart(9)).join('')}`);
     for (const [sc, v] of Object.entries(m.scenes)) {
       const lims = (b.scenes && b.scenes[sc]) || {};
@@ -89,9 +102,9 @@ for (const name of Object.keys(CONFIGS)) {
     console.log(`  played on the real clock (--play):\n    ${'scene'.padEnd(8)}${cols.map((c) => c.padStart(12)).join('')}`);
     for (const [sc, v] of Object.entries(m.play)) console.log(`    ${sc.padEnd(8)}${cols.map((c) => fmt(v[c]).padStart(12)).join('')}`);
   }
-  if (name === 'revisit' && raw[name].cold) {
+  if (raw[name].cold) {
     const c = raw[name].cold;
-    console.log(`  (cold load in the same profile: titleShown ${fmt(c.titleShown)}, titlePainted ${fmt(c.titlePainted)}, transitionMax ${fmt(c.transitionMax)})`);
+    console.log(`  (cold load in the same profile: titleShown ${fmt(c.titleShown)}, titlePainted ${fmt(c.titlePainted)}, transitionMax ${fmt(c.transitionMax)}; bitmaps the game wrote to the store before the reload ${fmt(c.storeWrites)}, left for a forced write ${fmt(c.storeForced)})`);
   }
 }
 
@@ -99,7 +112,7 @@ if (process.argv.includes('--update-baseline')) {
   const rec = { recorded: new Date().toISOString(), runs: +RUNS, machine: `${os.cpus().length} CPUs, ${os.platform()}`, note: 'headless Chromium, 1280x720 at deviceScaleFactor 2 (tools/perf.mjs)', ...baseline };
   rec.recorded = new Date().toISOString();
   rec.runs = +RUNS;
-  for (const name of Object.keys(CONFIGS)) {
+  for (const name of Object.keys(CONFIGS).filter((n) => measured[n])) {
     rec[name] = Object.fromEntries(METRICS.filter((k) => measured[name][k] != null).map((k) => [k, measured[name][k]]));
     if (measured[name].scenes) rec[name].scenes = measured[name].scenes;
     if (measured[name].play) rec[name].play = measured[name].play;
