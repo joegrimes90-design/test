@@ -49,20 +49,24 @@
   // ---------- scene manager ----------
   // AT.go(name): fade to paper, build the scene behind the cover (the stage hidden: nothing
   // under the cover paints, and in live play the clock stands still until it has faded in),
-  // paint its sprite bitmaps and every other bitmap its manifest lists (js/sprite-manifest.js:
-  // close-ups, celebrations, particles, thought bubbles, so nothing is painted during play), then
-  // fade in. On a cold first visit (live play, bitmaps for the first scene neither painted nor
-  // stored) the scene is shown at once, still, with its plain SVG sprites and a progress pill,
-  // while the bitmaps are painted; they go in all at once and then the clock starts
-  // (coldPreview). Once a scene is shown, bitmaps of the scenes that can follow are painted in
-  // idle time (AT.art.idlePrefetch: backgrounds two of them share, then small sprites).
-  let going = false, goSeq = 0, previewing = false;
+  // paint its sprite bitmaps, then fade in and play it. Every other bitmap its manifest lists
+  // (js/sprite-manifest.js: close-ups, celebrations, particles, thought bubbles) starts painting
+  // with the scene's own, the big ones first, and goes on in the background once the scene plays
+  // (so nothing it asks for is painted when it asks; a close-up reached before its bitmap is ready
+  // waits for it behind its own cover). On a cold first visit (live play, bitmaps for the first
+  // scene neither painted nor stored) the scene is shown at once, still, with its plain SVG sprites
+  // and a progress pill, while the bitmaps are painted; they go in all at once and then the clock
+  // starts (coldPreview). Once a scene is shown, bitmaps of the scenes that can follow are painted
+  // in idle time (AT.art.idlePrefetch: backgrounds two of them share, then small sprites).
+  // An AT.go asked for while a scene is loading (the Home button tapped as it fades in) runs as
+  // soon as that scene is shown, unless it is for that very scene.
+  let going = false, goSeq = 0, previewing = false, queuedGo = null;
   AT.sceneName = null;
   const mark = (n) => { try { performance.mark(n); } catch (e) { /* old browsers */ } };
   AT.mark = mark;
   const live = () => !E.manual && !E.recording;
   AT.go = async (name, params = {}) => {
-    if (going) return;
+    if (going) { queuedGo = [name, params]; return; }
     going = true;
     const seq = ++goSeq;
     const first = !AT.sceneName;
@@ -71,7 +75,7 @@
     AT.art.play(false);
     AT.art.idlePrefetch(null); // (not while a scene is loading)
     // start painting what the scene's manifest lists now, while the last scene fades out
-    const manifest = AT.art.prefetchScene(name);
+    AT.art.prefetchScene(name);
     if (AT.sceneName) await E.fadeTo(1, 0.35);
     mark(`at:faded:${name}`);
     // Nothing under the cover paints while the scene is built and its sprite bitmaps
@@ -118,19 +122,25 @@
     await AT.imagesReady(E.stage, 10000);
     E.stage.classList.remove('covered');
     mark(`at:built:${name}`);
-    // the rest of the manifest (close-ups, celebrations, particles) by the time the scene plays: at
-    // the latest while it fades in (nothing is painted once it plays; small ones by then, so the
-    // fade's own frames still get through). In live play the scene's clock starts once it has faded
-    // in: a still scene under the fading paper is rastered once, not every frame alongside the painting.
-    const fadeIn = E.fadeTo(0, 0.45).then(() => E.hold('build', false));
-    await Promise.all([fadeIn, ...manifest.map((m) => m[0])]);
+    // In live play the scene's clock starts once it has faded in: a still scene under the fading
+    // paper is rastered once, not every frame alongside the painting. It is played as soon as it
+    // has faded in; the rest of its manifest (close-ups, celebrations, particles) goes on painting
+    // meanwhile, with fewer threads (lanes(false): the scene's own frames come first).
+    await E.fadeTo(0, 0.45);
+    E.hold('build', false);
     AT.art.lanes(false);
     mark(`at:shown:${name}`);
     if (first) mark(`at:live:${name}`);
     going = false;
     shown(name);
     E.spawn(() => sc.run(ctx, params));
+    goQueued(name);
   };
+  function goQueued(name) {
+    const q = queuedGo;
+    queuedGo = null;
+    if (q && q[0] !== name) AT.go(q[0], q[1]);
+  }
   // A cold first visit: the scene still, as SVG, while its bitmaps are painted. Nothing moves, so
   // the SVG is rasterised once; a tap is taken (the title's wait for it ends) and the scene goes on
   // when the clock starts.
@@ -164,6 +174,7 @@
     const shownAt = performance.now();
     going = false;
     E.spawn(() => sc.run(ctx, params));
+    goQueued(name);
     const current = () => seq === goSeq;
     try {
       // every bitmap painted first (a resize meanwhile: again, for the new scale), then put in at
@@ -218,8 +229,9 @@
       } catch (e) { /* no largest-contentful-paint here */ }
     });
   }
-  // after a scene has faded in: store new bitmaps (when idle), paint the next scenes' small
-  // sprites in idle time, and once a session tidy the stored bitmaps
+  // after a scene has faded in: store new bitmaps (when idle; those painted while it is played, the
+  // rest of its manifest among them, are stored as they come), paint the next scenes' small sprites in
+  // idle time, and once a session tidy the stored bitmaps
   function shown(name) {
     AT.art.play(true);
     AT.art.persist();

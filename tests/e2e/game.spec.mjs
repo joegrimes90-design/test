@@ -105,6 +105,20 @@ test('Home button goes back to the hub, and from the hub to the title', async ({
   expect(await page.evaluate(() => AT.sceneName)).toBe('title');
 });
 
+test('a Home tap while a scene is still fading in is not lost: the hub follows', async ({ page }) => {
+  await prepare(page);
+  await openGame(page, { scene: 'hub' });
+  await waitShown(page, 'hub');
+  await page.evaluate(() => { AT.go('potty'); });
+  await stepUntil(page, () => performance.getEntriesByName('at:built:potty').length > 0, { maxClock: 20 });
+  expect(await page.evaluate(() => performance.getEntriesByName('at:shown:potty').length), 'potty still fading in').toBe(0);
+  await tapElement(page, '#btn-home');
+  await waitShown(page, 'potty', { maxClock: 5 });
+  await stepUntil(page, () => performance.getEntriesByName('at:shown:hub').length >= 2, { maxClock: 20 });
+  expect(await page.evaluate(() => AT.sceneName)).toBe('hub');
+  expect(await page.evaluate(() => AT.progress.potty)).toBe(false);
+});
+
 test('sound toggle persists across reloads', async ({ page }) => {
   await prepare(page);
   await openGame(page);
