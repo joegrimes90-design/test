@@ -58,6 +58,8 @@ AT.scenes.title = {
         resolve();
       };
       document.addEventListener('pointerup', go, true);
+      // left without a tap (AT.go from tools and tests): a later tap must not start the title
+      E.onEnd(() => document.removeEventListener('pointerup', go, true));
     });
     const t0 = E.time;
     await E.until(() => AT.audio.ready || E.time - t0 > 1);

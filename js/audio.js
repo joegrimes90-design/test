@@ -30,11 +30,26 @@ AT.audio = (() => {
     ({ master, musicBus, sfxBus, voiceBus, duck } = build(ctx));
     master.gain.value = muted ? 0 : 1;
   }
+  // While the game clock is paused (sprites being repainted after a resize), sound pauses
+  // too, so narration does not run ahead of the still scene.
+  let held = false, heldRunning = false;
+  function hold(on) {
+    on = !!on;
+    if (on === held) return;
+    held = on;
+    if (!ctx || rec.on) return;
+    const quiet = (p) => { if (p && p.catch) p.catch(() => {}); };
+    try {
+      if (on) { heldRunning = ctx.state === 'running'; if (heldRunning) quiet(ctx.suspend()); }
+      else if (heldRunning) { heldRunning = false; quiet(ctx.resume()); }
+    } catch (e) { /* old Web Audio */ }
+  }
   function unlock() {
     init();
     if (!ctx) return;
     try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { /* optional */ }
-    if (ctx.state !== 'running') ctx.resume();
+    if (held) heldRunning = true; // resumed when the pause ends
+    else if (ctx.state !== 'running') ctx.resume();
     const b = ctx.createBuffer(1, 1, 22050);
     const s = ctx.createBufferSource();
     s.buffer = b; s.connect(ctx.destination); s.start(0);
@@ -459,7 +474,7 @@ AT.audio = (() => {
   }
 
   return {
-    init, unlock, sfx, music, stopMusic, voice, stopVoice, setMuted, renderOffline, rec,
+    init, unlock, hold, sfx, music, stopMusic, voice, stopVoice, setMuted, renderOffline, rec,
     get muted() { return muted; },
     get ready() { return !!ctx && ctx.state === 'running'; },
     get ctx() { return ctx; },

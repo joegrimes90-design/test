@@ -1,6 +1,6 @@
 // Load-performance benchmark.
 //   node tools/perf.mjs [--cpu 4] [--runs 3] [--json out.json] [--dpr 2] [--page /index.html]
-//                       [--scenes] [--revisit] [--trace]
+//                       [--scenes] [--revisit] [--trace] [--play] [--play-cap 45000] [--play-speed 2]
 //                       [--title-frames 120] [--scene-frames 60] [--title-cap 12000] [--scene-cap 5000]
 //
 // Opens index.html in headless Chromium with the CPU slowed down (like a
@@ -13,8 +13,9 @@
 //   titleFrame      when the harness first saw the painted title (kept for continuity)
 //   frameP50/P95    rAF intervals on the animated title (up to --title-frames intervals or
 //                   --title-cap ms, whichever comes first: slow frames would otherwise take minutes)
-//   maxLongTaskPlay longest task after the title was painted that does not overlap a scene
-//                   transition (at:go:X .. at:shown:X): jank while playing, not loading
+//   maxLongTaskIdle longest task after the title was painted, outside scene transitions
+//                   (at:go:X .. at:shown:X) and outside --play: only idle frames (the title
+//                   and each scene just after it is entered), nobody tapping anything
 // --scenes   then visits hub, potty, teeth, baby, tv and party with AT.go and reports, per
 //            scene, the phases faded/dom/raster/built/shown/painted relative to the AT.go call
 //            and the scene's frame p50/p95 (up to --scene-frames intervals or --scene-cap ms).
@@ -23,7 +24,14 @@
 //            again in the same profile (revisit.*), so persistent caches count.
 // --trace    1 s after the title is painted, records a 3 s Chromium trace and reports
 //            rasterMsPerFrame: tile-raster time on the raster worker threads per frame drawn.
+// --play     then plays potty and teeth on the real clock (at --play-speed, for up to
+//            --play-cap ms each) with the test suites' auto-player (tests/helpers/game.mjs:
+//            taps what glows, rubs where the hand points, brushes the dirty teeth) and reports
+//            maxLongTaskPlay (the longest task while playing, outside AT.go transitions: card
+//            pop-ins, thought bubbles, star flights and the teeth close-up all count) and
+//            playFrameP95 (the worst scene's rAF p95 while playing), per scene under play.*
 import { chromium } from 'playwright';
+import { prepare } from '../tests/helpers/game.mjs';
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -38,7 +46,9 @@ const CPU = +arg('cpu', 4), RUNS = +arg('runs', 3), OUT = arg('json', null), PAG
 const DPR = +arg('dpr', 2);
 const TITLE_FRAMES = +arg('title-frames', 120), SCENE_FRAMES = +arg('scene-frames', 60);
 const TITLE_CAP = +arg('title-cap', 12000), SCENE_CAP = +arg('scene-cap', 5000);
-const SCENES = flag('scenes'), REVISIT = flag('revisit'), TRACE = flag('trace');
+const SCENES = flag('scenes'), REVISIT = flag('revisit'), TRACE = flag('trace'), PLAY = flag('play');
+const PLAY_CAP = +arg('play-cap', 45000), PLAY_SPEED = +arg('play-speed', 2);
+const PLAY_SCENES = ['potty', 'teeth'];
 const SCENE_LIST = ['hub', 'potty', 'teeth', 'baby', 'tv', 'party'];
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.mp4': 'video/mp4', '.webm': 'video/webm', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.png': 'image/png', '.json': 'application/json', '.woff2': 'font/woff2' };
 
@@ -130,6 +140,59 @@ async function traceRaster(page) {
   return { rasterMsPerFrame: +(r.ms / Math.max(1, frames)).toFixed(1), traceFrames: frames, rasterEvent: r.event };
 }
 
+// --play: enter `name` with AT.go, then play it on the real clock with the test suites'
+// auto-player (window.__auto, installed by tests/helpers/game.mjs prepare()) until it goes
+// back to the hub or PLAY_CAP ms pass. Long tasks inside the window that do not overlap an
+// AT.go transition, and the rAF intervals of the whole window, are what a child playing sees.
+async function playScene(page, name) {
+  await page.evaluate(async ([n, speed]) => {
+    const count = () => performance.getEntriesByName('at:painted:' + n).length;
+    const before = count();
+    AT.go(n);
+    const t0 = performance.now();
+    await new Promise((ok, fail) => { const chk = () => (count() > before ? ok() : performance.now() - t0 > 120000 ? fail(new Error(`${n} not shown`)) : setTimeout(chk, 20)); chk(); });
+    AT.engine.speed = speed;
+    window.__pf = []; window.__pfOn = true;
+    let last = null;
+    const f = (now) => { if (last !== null) window.__pf.push(now - last); last = now; if (window.__pfOn) requestAnimationFrame(f); };
+    requestAnimationFrame(f);
+    window.__playFrom = performance.now();
+  }, [name, PLAY_SPEED]);
+  const end = Date.now() + PLAY_CAP;
+  let actions = 0;
+  while (Date.now() < end) {
+    const st = await page.evaluate(() => ({ scene: AT.sceneName, a: window.__auto.find() }));
+    if (st.scene !== name) break;
+    if (!st.a) { await page.waitForTimeout(150); continue; }
+    actions++;
+    if (st.a.type === 'tap') {
+      const p = await page.evaluate(() => window.__auto.aim());
+      await page.mouse.click(p.x, p.y);
+    } else {
+      for (const [x, y] of st.a.path) await page.mouse.move(x, y);
+    }
+  }
+  return page.evaluate(([n, actions]) => {
+    window.__pfOn = false;
+    AT.engine.speed = 1;
+    const a = window.__playFrom, b = performance.now();
+    (window.__playWindows = window.__playWindows || []).push([a, b]);
+    const marks = performance.getEntriesByType('mark');
+    const trans = marks.filter((m) => m.name.startsWith('at:shown:') && m.startTime > a).map((s) => {
+      const go = marks.filter((m) => m.name === 'at:go:' + s.name.slice(9) && m.startTime <= s.startTime).pop();
+      return [go ? go.startTime : a, s.startTime];
+    });
+    const long = window.__long.filter(([st, d]) => st < b && st + d > a && !trans.some(([x, y]) => st < y && st + d > x));
+    const s = window.__pf.slice(2).sort((x, y) => x - y);
+    const q = (p) => (s.length ? +s[Math.min(s.length - 1, Math.floor(s.length * p))].toFixed(1) : null);
+    return {
+      sec: Math.round((b - a) / 100) / 10, actions, reachedHub: AT.sceneName === 'hub', gameClock: Math.round(AT.engine.time),
+      frameP50: q(0.5), frameP95: q(0.95), frameMax: s.length ? Math.round(s[s.length - 1]) : null,
+      maxLongTask: Math.round(Math.max(0, ...long.map((x) => x[1]))), longTaskMs: Math.round(long.reduce((x, y) => x + y[1], 0)), longTasks: long.length,
+    };
+  }, [name, actions]);
+}
+
 // One load of the page in `page`, measured up to the painted title (and beyond, with flags).
 async function measureLoad(page, cdp, opts = {}) {
   await cdp.send('Emulation.setCPUThrottlingRate', { rate: CPU });
@@ -174,7 +237,16 @@ async function measureLoad(page, cdp, opts = {}) {
     const fp = Object.values(r.scenes).map((s) => s.frameP95).filter((v) => v != null);
     r.sceneFrameP95 = fp.length ? Math.max(...fp) : null;
   }
-  // long tasks: 'cover' while a scene is loading (boot or at:go:X .. at:shown:X), else 'play'
+  if (PLAY) {
+    r.play = {};
+    for (const sc of PLAY_SCENES) r.play[sc] = await playScene(page, sc);
+    const v = (k) => Object.values(r.play).map((x) => x[k]).filter((x) => x != null);
+    r.maxLongTaskPlay = Math.max(0, ...v('maxLongTask'));
+    r.longTaskPlayMs = v('longTaskMs').reduce((a, b) => a + b, 0);
+    r.playFrameP95 = v('frameP95').length ? Math.max(...v('frameP95')) : null;
+  }
+  // long tasks: 'cover' while a scene is loading (boot or at:go:X .. at:shown:X), 'play' in a
+  // --play window, else 'idle'
   Object.assign(r, await page.evaluate(() => {
     const windows = [];
     const shown = performance.getEntriesByType('mark').filter((e) => e.name.startsWith('at:shown:'));
@@ -185,12 +257,13 @@ async function measureLoad(page, cdp, opts = {}) {
     }
     const painted = performance.getEntriesByName('at:painted:title')[0];
     const from = painted ? painted.startTime : Infinity;
-    const play = window.__long.filter(([st, d]) => st >= from && !windows.some(([a, b]) => st < b && st + d > a));
+    const plays = window.__playWindows || [];
+    const idle = window.__long.filter(([st, d]) => st >= from && !windows.some(([a, b]) => st < b && st + d > a) && !plays.some(([a, b]) => st < b && st + d > a));
     return {
       longTasks: window.__long.length, longTaskMs: Math.round(window.__long.reduce((a, b) => a + b[1], 0)),
       maxLongTask: Math.round(Math.max(0, ...window.__long.map((x) => x[1]))),
-      maxLongTaskPlay: Math.round(Math.max(0, ...play.map((x) => x[1]))),
-      longTaskPlayMs: Math.round(play.reduce((a, b) => a + b[1], 0)),
+      maxLongTaskIdle: Math.round(Math.max(0, ...idle.map((x) => x[1]))),
+      longTaskIdleMs: Math.round(idle.reduce((a, b) => a + b[1], 0)),
       heapMB: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null,
     };
   }));
@@ -204,6 +277,7 @@ async function setupPage(ctx, page) {
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   await page.addInitScript(pageInit);
+  if (PLAY) await prepare(page, { audio: true }); // the auto-player (and seeded Math.random)
   return { cdp, errors };
 }
 
@@ -234,8 +308,9 @@ async function oneRun() {
 }
 
 const KEYS = ['fcp', 'domContentLoaded', 'boot', 'warm', 'titleBuilt', 'titleShown', 'titlePainted', 'titleLive', 'titleFrame',
-  'frameP50', 'frameP95', 'rasterMsPerFrame', 'longTasks', 'longTaskMs', 'maxLongTask', 'maxLongTaskPlay', 'longTaskPlayMs',
-  'transitionMax', 'sceneFrameP95', 'scriptSec', 'taskSec', 'heapMB', 'errors'];
+  'frameP50', 'frameP95', 'rasterMsPerFrame', 'longTasks', 'longTaskMs', 'maxLongTask', 'maxLongTaskIdle', 'longTaskIdleMs',
+  'maxLongTaskPlay', 'longTaskPlayMs', 'playFrameP95', 'transitionMax', 'sceneFrameP95', 'scriptSec', 'taskSec', 'heapMB', 'errors'];
+const PLAY_KEYS = ['sec', 'actions', 'gameClock', 'frameP50', 'frameP95', 'frameMax', 'maxLongTask', 'longTaskMs', 'longTasks'];
 const SCENE_KEYS = ['faded', 'dom', 'raster', 'built', 'shown', 'painted', 'frameP50', 'frameP95'];
 function summarise(runs) {
   const s = {};
@@ -245,6 +320,13 @@ function summarise(runs) {
     for (const sc of Object.keys(runs[0].scenes)) {
       s.scenes[sc] = {};
       for (const k of SCENE_KEYS) s.scenes[sc][k] = median(runs.map((r) => r.scenes[sc][k]));
+    }
+  }
+  if (runs[0].play) {
+    s.play = {};
+    for (const sc of Object.keys(runs[0].play)) {
+      s.play[sc] = {};
+      for (const k of PLAY_KEYS) s.play[sc][k] = median(runs.map((r) => r.play[sc][k]));
     }
   }
   return s;

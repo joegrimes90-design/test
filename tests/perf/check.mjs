@@ -3,8 +3,9 @@
 // Runs tools/perf.mjs in three configurations and prints the numbers next to
 // tests/perf/budget.json and tests/perf/baseline.json; exits 1 if a budgeted
 // metric is over budget (the 'stretch' block is printed but never fails):
-//   noThrottle  no CPU throttle, with --scenes (transition phases, per-scene frames)
-//               and --trace (tile raster ms per frame on the idle title)
+//   noThrottle  no CPU throttle, with --scenes (transition phases, per-scene frames),
+//               --trace (tile raster ms per frame on the idle title) and --play (potty
+//               and teeth played on the real clock: long tasks and frames while playing)
 //   cpu4        4x CPU throttle, like a tablet
 //   revisit     no throttle, a persistent profile loaded twice (--revisit): the second
 //               load (revisit.*) is what a returning player sees
@@ -25,7 +26,7 @@ const baseline = fs.existsSync(baselineFile) ? JSON.parse(fs.readFileSync(baseli
 
 // name -> [perf.mjs args, key of the result object to read (null = top level)]
 const ALL = {
-  noThrottle: [['--cpu', '1', '--scenes', '--trace'], null],
+  noThrottle: [['--cpu', '1', '--scenes', '--trace', '--play'], null],
   cpu4: [['--cpu', '4'], null],
   // frames are measured by the other two; here only load and transition times matter
   revisit: [['--cpu', '1', '--revisit', '--scenes', '--title-frames', '0', '--scene-frames', '0'], 'revisit'],
@@ -47,7 +48,7 @@ for (const [name, [args, key]] of Object.entries(CONFIGS)) {
 }
 
 const METRICS = ['titleShown', 'titlePainted', 'titleLive', 'frameP50', 'frameP95', 'rasterMsPerFrame', 'maxLongTaskPlay',
-  'transitionMax', 'sceneFrameP95', 'warm', 'fcp', 'longTaskMs', 'maxLongTask', 'heapMB', 'errors'];
+  'playFrameP95', 'maxLongTaskIdle', 'transitionMax', 'sceneFrameP95', 'warm', 'fcp', 'longTaskMs', 'maxLongTask', 'heapMB', 'errors'];
 const fails = [];
 const fmt = (v) => (v == null ? '-' : String(v));
 for (const name of Object.keys(CONFIGS)) {
@@ -72,6 +73,11 @@ for (const name of Object.keys(CONFIGS)) {
     console.log(`  per scene (ms after AT.go):\n    ${'scene'.padEnd(8)}${cols.map((c) => c.padStart(9)).join('')}`);
     for (const [sc, v] of Object.entries(m.scenes)) console.log(`    ${sc.padEnd(8)}${cols.map((c) => fmt(v[c]).padStart(9)).join('')}`);
   }
+  if (m.play) {
+    const cols = ['sec', 'actions', 'gameClock', 'frameP50', 'frameP95', 'frameMax', 'maxLongTask', 'longTaskMs'];
+    console.log(`  played on the real clock (--play):\n    ${'scene'.padEnd(8)}${cols.map((c) => c.padStart(12)).join('')}`);
+    for (const [sc, v] of Object.entries(m.play)) console.log(`    ${sc.padEnd(8)}${cols.map((c) => fmt(v[c]).padStart(12)).join('')}`);
+  }
   if (name === 'revisit' && raw[name].cold) {
     const c = raw[name].cold;
     console.log(`  (cold load in the same profile: titleShown ${fmt(c.titleShown)}, titlePainted ${fmt(c.titlePainted)}, transitionMax ${fmt(c.transitionMax)})`);
@@ -85,6 +91,7 @@ if (process.argv.includes('--update-baseline')) {
   for (const name of Object.keys(CONFIGS)) {
     rec[name] = Object.fromEntries(METRICS.filter((k) => measured[name][k] != null).map((k) => [k, measured[name][k]]));
     if (measured[name].scenes) rec[name].scenes = measured[name].scenes;
+    if (measured[name].play) rec[name].play = measured[name].play;
   }
   fs.writeFileSync(baselineFile, JSON.stringify(rec, null, 2) + '\n');
   console.log(`\nwrote ${path.relative(root, baselineFile)}`);

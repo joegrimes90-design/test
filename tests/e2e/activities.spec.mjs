@@ -20,8 +20,9 @@ for (const activity of ['potty', 'teeth', 'baby']) {
     expect(state.saved[activity]).toBe(true);
     // the other stickers are untouched
     for (const other of ['potty', 'teeth', 'baby'].filter((k) => k !== activity)) expect(state.progress[other]).toBe(false);
-    // sprite bitmaps stayed within their memory budget
+    // sprite bitmaps stayed within their memory budget (decoded bytes; tests/e2e/bitmaps.spec.mjs
+    // squeezes the budget to check that eviction works)
     const mem = await page.evaluate(() => AT.art.stats());
-    expect(mem.bytes, `PNG bytes of ${mem.cached} cached bitmaps`).toBeLessThanOrEqual(mem.budget);
+    expect(mem.decoded, `decoded bytes of ${mem.cached} cached bitmaps`).toBeLessThanOrEqual(Math.max(mem.budget, mem.inUseDecoded));
   });
 }

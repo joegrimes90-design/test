@@ -173,11 +173,14 @@ AT.scenes.teeth = {
   async brushing(c) {
     const E = AT.engine;
     await E.fadeTo(1, 0.3);
+    // as in AT.go: nothing under the cover paints while the close-up's bitmaps are painted
+    E.stage.classList.add('covered');
     const m = this.buildMouth();
     const { view, teeth, brush } = m;
     const scrubAt = m.scrubAt;
     await AT.art.fit(view.el);
     await AT.imagesReady(view.el, 1500);
+    E.stage.classList.remove('covered');
     await E.fadeTo(0, 0.3);
     AT.cast.A && AT.cast.A.setFace({ mouth: 'ahh' });
     await AT.say('n_open_wide');

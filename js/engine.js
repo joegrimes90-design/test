@@ -125,14 +125,18 @@ AT.engine = (() => {
     };
     // a node changing size: its sprite bitmaps must never be shown magnified (AT.art)
     const scaled = target instanceof Node && ('s' in to || 'sx' in to || 'sy' in to) && AT.art && AT.art.tweenStart;
-    if (dur <= 0) { apply(1); if (scaled) AT.art.fit(target.el); return resolve(); }
+    // a camera pan or a node's move: when it ends, sprites at rest re-snap to whole device pixels (AT.art)
+    const cam = target === E.camera;
+    const moved = (cam || (target instanceof Node && ('x' in to || 'y' in to))) && AT.art && AT.art.resnapSoon;
+    const ended = () => { if (moved) AT.art.resnapSoon(cam ? E.world : target.el); };
+    if (dur <= 0) { apply(1); if (scaled) AT.art.fit(target.el); ended(); return resolve(); }
     if (scaled) AT.art.tweenStart(target, to, fn);
     const u = {
-      token: tk,
+      token: tk, cam,
       fn: () => {
         const p = Math.min(1, (E.time - start) / dur);
         apply(p);
-        if (p >= 1) { remove(u); if (scaled) AT.art.tweenEnd(target); resolve(); }
+        if (p >= 1) { remove(u); if (scaled) AT.art.tweenEnd(target); ended(); resolve(); }
       },
     };
     updaters.push(u);
@@ -210,6 +214,9 @@ AT.engine = (() => {
     set(p) {
       Object.assign(this, p);
       E.world.style.transform = `scale(${this.zoom}) translate(${-this.x}px,${-this.y}px)`;
+      // a jump rather than a pan (E.tween re-snaps when a pan ends): sprites at rest
+      // re-snap to whole device pixels (AT.art)
+      if (AT.art && AT.art.resnapSoon && !updaters.some((u) => u.cam && !u.dead && u.token.alive)) AT.art.resnapSoon(E.world);
       return this;
     },
   };
@@ -477,14 +484,17 @@ AT.engine = (() => {
 
   // ---------- screen transitions ----------
   // E.cover: the same paper fade on the wall clock, for when the game clock is paused
+  // (While it fades, #fade is on its own compositor layer, so the still stage under it is not
+  // repainted every frame; it is the stage's last child, so this creates no overlap layers.)
   E.cover = (opacity, dur = 0.25) => new Promise((resolve) => {
     const from = parseFloat(E.fade.style.opacity || getComputedStyle(E.fade).opacity || 0);
     E.fade.style.pointerEvents = opacity > 0 ? 'auto' : 'none';
+    E.fade.style.willChange = 'opacity';
     const t0 = performance.now();
     const f = (now) => {
       const p = Math.min(1, (now - t0) / (dur * 1000));
       E.fade.style.opacity = (from + (opacity - from) * ease.inOut(p)).toFixed(3);
-      if (p < 1) requestAnimationFrame(f); else resolve();
+      if (p < 1) requestAnimationFrame(f); else { E.fade.style.willChange = ''; resolve(); }
     };
     requestAnimationFrame(f);
   });

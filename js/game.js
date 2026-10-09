@@ -92,34 +92,101 @@
 
   // ---------- resizes: sprite bitmaps follow the new device scale ----------
   // (E.onResized is called by the engine on resize, rotation, fullscreen and zoom.)
-  // After 250 ms without further changes: when bitmaps for the new scale are all
-  // cached, swap them at once; otherwise pause the clock behind the paper cover,
-  // paint them, and uncover. Bitmaps for the old scale stay cached.
-  let refitTimer = 0, refitDone = null, refits = Promise.resolve();
+  // At once: every sprite gets its cached bitmap for the new scale, or its SVG where
+  // the old bitmap would now be shown magnified (AT.art.resized). In live play, if any
+  // had to go back to SVG, the clock pauses behind the paper cover straight away
+  // (rather than show a moving stage of slow SVG sprites). After 250 ms without
+  // further changes: when every bitmap is cached, they are swapped in; otherwise they
+  // are painted with the clock and sound paused. The blank cover lasts at most about
+  // 1 s: if painting will take longer (estimated, or it turns out to), the still scene
+  // is shown first (sprites not painted yet show their SVG, which looks the same and,
+  // as nothing moves, costs one raster) with a progress pill. The new bitmaps go in
+  // all at once when they are all painted, and the clock starts again. Bitmaps for
+  // the old scale stay cached.
+  // ms of blank paper at most (unless one sprite alone takes longer); tests may lower it
+  const tun = window.__AT_RASTER_TUNING || {};
+  const REFIT_COVER_MAX = tun.refitCoverMs >= 0 ? tun.refitCoverMs : 1000;
+  let refitTimer = 0, refitDone = null, refits = Promise.resolve(), refitCovered = false, coveredAt = 0;
+  const live = () => !E.manual && !E.recording;
+  function pauseForRefit() {
+    refitCovered = true;
+    coveredAt = performance.now();
+    mark('at:refit:cover');
+    E.paused = true;
+    if (AT.audio.hold) AT.audio.hold(true);
+  }
   E.onResized = () => {
     if (AT.art.mode !== 'bitmap') return;
+    const toSvg = AT.art.resized(E.stage);
     if (!refitDone) AT.art.track(new Promise((r) => { refitDone = r; }));
+    if (toSvg && live() && AT.sceneName && !going && !refitCovered) {
+      pauseForRefit();
+      E.fade.style.opacity = 1;
+      E.fade.style.pointerEvents = 'auto';
+      E.stage.classList.add('covered');
+    }
     clearTimeout(refitTimer);
     refitTimer = setTimeout(() => { refits = refits.then(refitStage); }, 250);
   };
+  const wallWait = (ms) => new Promise((r) => setTimeout(r, ms));
+  // 'Getting the paints ready…' pill above the stage (outside it: it never repaints the stage)
+  function progressPill() {
+    let el = null, fill = null, p = 0;
+    return {
+      set(v) { p = v; if (fill) fill.style.transform = `scaleX(${Math.max(0, Math.min(1, p)).toFixed(3)})`; },
+      show() {
+        if (el) return;
+        el = document.createElement('div');
+        el.id = 'repaint';
+        el.innerHTML = '<div>Getting the paints ready…</div><div class="bar"><div class="fill"></div></div>';
+        fill = el.querySelector('.fill');
+        this.set(p);
+        document.body.appendChild(el);
+      },
+      hide() { if (el) el.remove(); el = fill = null; },
+    };
+  }
   async function refitStage() {
     const done = refitDone;
     refitDone = null;
-    let covered = false;
+    AT.art.hold(false);
+    const pill = progressPill();
     try {
-      if (going || E.manual || E.recording || !AT.sceneName || AT.art.ready(E.stage)) { await AT.art.fit(E.stage); return; }
-      covered = true;
-      mark('at:refit:cover');
-      E.paused = true;
-      await E.cover(1, 0.2);
+      if (!refitCovered && (going || !live() || !AT.sceneName || AT.art.ready(E.stage))) { await AT.art.fit(E.stage); return; }
+      if (!refitCovered) {
+        pauseForRefit();
+        await E.cover(1, 0.2);
+      }
       E.stage.classList.add('covered');
+      let previewed = false;
+      const preview = async () => {
+        previewed = true;
+        mark('at:refit:preview');
+        AT.art.inexactToSvg(E.stage);
+        pill.show();
+        E.stage.classList.remove('covered');
+        await E.cover(0, 0.3);
+        // let the uncovered frame reach the screen before a long paint blocks the page
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      };
+      const left = () => coveredAt + REFIT_COVER_MAX - performance.now();
+      // painting would outlast a short blank cover: show the still scene first (before
+      // painting starts, so its fade-in is not held up by a long paint)
+      if (AT.art.cost(E.stage) > left()) await preview();
+      // paint them all (put in at the end, at once)
+      const painting = AT.art.fit(E.stage, { defer: true, onProgress: (p) => pill.set(p) });
+      if (!previewed && !(await Promise.race([painting.then(() => true), wallWait(Math.max(0, left())).then(() => false)]))) await preview();
+      await painting;
       await AT.art.fit(E.stage);
       await AT.imagesReady(E.stage, 10000);
     } finally {
-      if (covered) {
+      pill.hide();
+      if (refitCovered) {
         E.stage.classList.remove('covered');
-        await E.cover(0, 0.3);
+        if (parseFloat(E.fade.style.opacity || 0) > 0) await E.cover(0, 0.3);
+        refitCovered = false;
         E.paused = false;
+        if (AT.audio.hold) AT.audio.hold(false);
       }
       mark('at:refit');
       if (done) done();
