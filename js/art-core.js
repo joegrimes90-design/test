@@ -289,7 +289,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   const failed = new Set();     // keys that cannot be painted (too big, decode errors)
   const pendingFit = new Set(); // imgs created since the last microtask flush
   const idleWaiters = [];
-  const st = { jobs: 0, ms: 0, hits: 0, misses: 0, svgFallbacks: 0, bytes: 0, decoded: 0, evicted: 0, syncJobs: 0, dropped: 0, resnaps: 0, asyncJobs: 0, asyncMs: 0, asyncFallbacks: 0, prefetched: 0, idleJobs: 0, playMisses: 0, stored: 0, storedBad: 0 };
+  const st = { jobs: 0, ms: 0, hits: 0, misses: 0, svgFallbacks: 0, bytes: 0, decoded: 0, evicted: 0, syncJobs: 0, dropped: 0, resnaps: 0, asyncJobs: 0, asyncMs: 0, asyncFallbacks: 0, asyncKept: 0, asyncStored: 0, prefetched: 0, idleJobs: 0, playMisses: 0, stored: 0, storedBad: 0 };
   const debug = params.get('debug') === '1';
   const SYNC_MS = 40; // a bitmap estimated to cost at most this may be painted on the spot (never inside an input event)
   let running = false, flushQueued = false, busy = 0, useClock = 0;
@@ -518,15 +518,12 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     learnMs += ms; learnPx += cw * ch;
     return makeEntry(id, k, cw, ch, blob, ms);
   }
-  // (fromStore: loaded from js/raster-cache.js, not painted; painted ones are stored there, when idle)
+  // (fromStore: loaded from js/raster-cache.js, not painted. A painted one is stored there once it
+  // is kept: store(), never before, e.g. while an off-thread one waits for the boot probe's answer.)
   function makeEntry(id, k, cw, ch, blob, ms, fromStore) {
-    if (!fromStore) {
-      st.jobs++; st.ms += ms;
-      const d = disk();
-      if (d) d.put(id, hashOf(id), k, { blob, cw, ch, ms });
-    }
+    if (!fromStore) { st.jobs++; st.ms += ms; }
     // decoded: what it costs in memory once shown (the PNG bytes are a fraction of that)
-    const entry = { key: keyOf(id, k), id, k, url: URL.createObjectURL(blob), blob, cw, ch, ms, bytes: blob.size, decoded: cw * ch * 4, used: ++useClock };
+    const entry = { key: keyOf(id, k), id, k, url: URL.createObjectURL(blob), blob, cw, ch, ms, bytes: blob.size, decoded: cw * ch * 4, used: ++useClock, fresh: !fromStore };
     // keep a decoded copy referenced so swapping the src is immediate
     entry.pre = new Image();
     entry.pre.src = entry.url;
@@ -733,7 +730,9 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     }, (e) => { if (rastered) rastered(); throw e; }).then((blob) => {
       const ms = performance.now() - t0;
       st.asyncJobs++; st.asyncMs += ms;
-      return makeEntry(id, k, cw, ch, blob, ms);
+      const e = makeEntry(id, k, cw, ch, blob, ms);
+      e.off = true; // (painted off the main thread: kept only if the boot probe says that is exact here)
+      return e;
     });
   }
   const pxOf = (job) => { const b = sprites[job.id].box; return Math.ceil(b[2] * job.k) * Math.ceil(b[3] * job.k); };
@@ -750,9 +749,18 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       if (w) w();
     };
     // superseded jobs (nobody wants them any more, e.g. after a resize) stop before painting or encoding
-    bakeAsync(job.id, job.k, () => mode === 'bitmap' && stillWanted(job), rastered)
-      // (painted before the boot probe had answered: kept only if it says off-thread painting is exact)
-      .then((e) => (asyncOk !== null ? e : asyncCheck().then((ok) => { if (!ok && e) { URL.revokeObjectURL(e.url); e.pre = null; throw new Error('probe'); } return e; })))
+    let painted;
+    try { painted = bakeAsync(job.id, job.k, () => mode === 'bitmap' && stillWanted(job), rastered); } catch (err) { painted = Promise.reject(err); }
+    painted
+      // Painting starts before the boot probe has answered, so every off-thread result waits for its
+      // answer (memoised: free once known) and is kept only if it says off-thread painting is exact
+      // here; otherwise it is thrown away and painted again on this thread. (A job started before a
+      // 'no' can finish long after it: the slow ones are the big ones.)
+      .then((e) => asyncCheck().then((ok) => {
+        if (!ok) { if (e) { URL.revokeObjectURL(e.url); e.pre = null; } throw new Error('probe'); }
+        if (e) st.asyncKept++;
+        return e;
+      }))
       // (decoded now only if an img wants it: a prefetch is decoded when it is shown, as decoding
       // runs on the same threads as the painting)
       .then((e) => (e && job.by.some((r) => r.im) ? predecode(e).then(() => e) : e))
@@ -804,6 +812,18 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   function store(entry) {
     const old = cache.get(entry.key);
     if (old) drop(old, false); // (never happens: requests are shared)
+    // painted (not loaded from the store) and kept: stored across visits, written when idle; not
+    // sprites at random sizes (balloons, soap bubbles: a new scale every time, never asked for again)
+    if (entry.fresh) {
+      entry.fresh = false;
+      const d = disk();
+      if (d && !randomScale(entry.id, entry.k)) {
+        d.put(entry.id, hashOf(entry.id), entry.k, entry);
+        if (entry.off) st.asyncStored++;
+        // (painted while a scene plays: the rest of its manifest, idle-time prefetches)
+        if (playing) d.flushSoon();
+      }
+    }
     cache.set(entry.key, entry);
     byUrl.set(entry.url, entry);
     if (!byId.has(entry.id)) byId.set(entry.id, new Set());
@@ -929,26 +949,28 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     loadingStored++;
     const sp = sprites[job.id];
     const cw = Math.ceil(sp.box[2] * job.k - 1e-6), ch = Math.ceil(sp.box[3] * job.k - 1e-6);
-    const e = makeEntry(job.id, job.k, cw, ch, rec.blob, rec.ms || 0, true);
-    // decoded now if an img wants it (else only loaded, enough to know its size)
-    const ready = job.by.some((r) => r.im) ? predecode(e) : new Promise((r) => { if (e.pre.complete) r(); else { e.pre.onload = r; e.pre.onerror = r; } });
-    ready.then(() => {
-      const ok = e.pre && e.pre.naturalWidth === cw && e.pre.naturalHeight === ch;
-      if (!ok) {
-        // wrong size or unreadable: forget it and paint it
-        st.storedBad++;
-        if (disk()) disk().drop(rec);
-        URL.revokeObjectURL(e.url);
-        job.unstored = true;
-        queue.push(job);
-        pump();
-        return;
-      }
+    let e = null;
+    // its PNG (from disk; in memory if it was painted this visit and not written yet)
+    Promise.resolve().then(() => disk().read(rec)).then((blob) => {
+      if (!blob) throw new Error('unreadable');
+      e = makeEntry(job.id, job.k, cw, ch, blob, rec.ms || 0, true);
+      // decoded now if an img wants it (else only loaded, enough to know its size)
+      return job.by.some((r) => r.im) ? predecode(e) : new Promise((r) => { if (e.pre.complete) r(); else { e.pre.onload = r; e.pre.onerror = r; } });
+    }).then(() => {
+      if (!(e.pre && e.pre.naturalWidth === cw && e.pre.naturalHeight === ch)) throw new Error('size');
       st.stored++;
       if (disk()) disk().touch(rec);
       if (mode === 'bitmap') store(e);
       jobs.delete(job.key);
       job.resolve(mode === 'bitmap' ? e : null);
+    }).catch(() => {
+      // wrong size, unreadable or not a PNG at all: forget the record and paint the bitmap
+      st.storedBad++;
+      if (disk()) disk().drop(rec);
+      if (e) { URL.revokeObjectURL(e.url); e.pre = null; }
+      job.unstored = true;
+      queue.push(job);
+      pump();
     }).finally(() => {
       loadingStored--;
       const w = slotWake; slotWake = null;
@@ -996,6 +1018,21 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       if (s < 0 || j.pri < queue[s].pri || (j.pri === queue[s].pri && j.px > queue[s].px)) s = i;
     }
     return s < 0 ? b : s;
+  }
+  // Does the current scene's manifest list sprite id at random sizes ([id, lo, hi, 0]) around k, and
+  // not at k itself? (An exact size listed among random ones is one the scene uses every time: the
+  // hand-washing foam blobs at rest. That one is painted ahead and stored like any other.)
+  function randomScale(id, k) {
+    const m = typeof window !== 'undefined' && window.AT_SPRITES && AT.sceneName && window.AT_SPRITES.scenes[AT.sceneName];
+    if (!m) return false;
+    const u = unitScale();
+    let random = false;
+    for (const e of m) {
+      if (e[0] !== id) continue;
+      if (e.length === 2 && Math.abs(round3(e[1] * u) - k) < 0.0015) return false;
+      if (e.length === 4 && e[3] === 0 && k >= (e[1] * u) / 1.1 && k <= e[2] * u * 1.1) random = true;
+    }
+    return random;
   }
   // estimated ms to paint sprite id at k (from the jobs so far)
   function estimate(id, k) {

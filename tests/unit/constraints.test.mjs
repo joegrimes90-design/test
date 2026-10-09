@@ -26,6 +26,13 @@ test('index.html uses classic local scripts and stylesheets only', () => {
   for (const f of cssFiles) assert.ok(fs.existsSync(path.join(ROOT, f)), f);
 });
 
+test('the game never asks for persistent storage (Firefox would show the player a permission prompt)', () => {
+  // the bitmap cache (js/raster-cache.js) is best-effort and cheap to rebuild
+  for (const f of jsFiles.filter((x) => !x.includes('voice-'))) {
+    assert.doesNotMatch(code(f), /navigator\s*\.\s*storage|storage\s*\.\s*persist|requestStorageAccess/, `${f} asks the browser for persistent storage`);
+  }
+});
+
 test('game scripts never load files at runtime (works from file://)', () => {
   const problems = [];
   for (const f of jsFiles.filter((x) => !x.includes('voice-data'))) {
