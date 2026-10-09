@@ -8,12 +8,14 @@ import { prepare, openGame, autoPlay, waitShown, step, settleForScreenshot } fro
 // visible bitmap shown magnified (AT.art.audit: k_bitmap < k_display / 1.01)?
 function startSampler() {
   window.__samples = [];
-  window.__jobs0 = AT.art.stats().jobs;
+  // bitmaps painted, not counting the idle-time prefetch of the next scene's small sprites
+  const painted = () => { const st = AT.art.stats(); return st.jobs - st.idleJobs; };
+  window.__jobs0 = painted();
   const f = () => {
     const E = AT.engine;
     if (performance.getEntriesByName('at:refit').length && window.__jobs1 == null) {
       // bitmaps painted for the resize, and the distinct bitmaps the stage now shows
-      window.__jobs1 = AT.art.stats().jobs;
+      window.__jobs1 = painted();
       window.__keys = new Set([...E.stage.querySelectorAll('img[data-k]')].map((im) => `${im.dataset.sprite}@${im.dataset.k}`)).size;
     }
     const visible = +getComputedStyle(E.fade).opacity < 1 && !E.stage.classList.contains('covered');
@@ -34,7 +36,8 @@ async function resizeLive(page, tuning) {
   if (tuning) await page.addInitScript((t) => { window.__AT_RASTER_TUNING = t; }, tuning);
   await prepare(page);
   await page.goto('/index.html');
-  await page.waitForFunction(() => performance.getEntriesByName('at:shown:title').length > 0, null, { timeout: 60_000 });
+  // the title animating (after the cold first visit's still preview: see the preview tests below)
+  await page.waitForFunction(() => performance.getEntriesByName('at:live:title').length > 0, null, { timeout: 60_000 });
   await page.evaluate(startSampler);
   await page.setViewportSize({ width: 1200, height: 675 }); // 1.5x: every bitmap would be magnified
   await page.waitForFunction(() => performance.getEntriesByName('at:refit').length > 0, null, { timeout: 90_000 });

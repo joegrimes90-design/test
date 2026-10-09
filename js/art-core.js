@@ -213,7 +213,8 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     const sp = sprites[id];
     if (!sp) throw new Error('No sprite ' + id);
     const el = document.createElement('img');
-    el.src = url(id);
+    // (bitmap mode: no src until it is fitted, see ensureSvg)
+    if (mode !== 'bitmap') el.src = url(id);
     el.alt = '';
     el.draggable = false;
     el.className = 'spr' + (cls ? ' ' + cls : '');
@@ -281,14 +282,14 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   const cache = new Map();      // `${id}@${k.toFixed(3)}` -> entry {key, id, k, url, blob, cw, ch, ms, bytes, decoded, used, pre}
   const byUrl = new Map();      // bitmap url -> entry
   const byId = new Map();       // sprite id -> Set of its entries
-  const jobs = new Map();       // key -> queued or running job {id, k, key, promise, resolve, by: [{im, prefetch}], direct}
-  const queue = [];             // jobs, first come first served
+  const jobs = new Map();       // key -> queued or running job {id, k, key, px, pri, promise, resolve, by: [{im, prefetch, urgent} | {tag}], direct}
+  const queue = [];             // jobs waiting (most urgent first, then the biggest: see pick())
   const svgImgs = new Map();    // id -> Promise<loaded SVG HTMLImageElement|null>
   const svgReady = new Map();   // id -> loaded SVG HTMLImageElement (for painting synchronously)
   const failed = new Set();     // keys that cannot be painted (too big, decode errors)
   const pendingFit = new Set(); // imgs created since the last microtask flush
   const idleWaiters = [];
-  const st = { jobs: 0, ms: 0, hits: 0, misses: 0, svgFallbacks: 0, bytes: 0, decoded: 0, evicted: 0, syncJobs: 0, dropped: 0, resnaps: 0, asyncJobs: 0, asyncMs: 0, asyncFallbacks: 0 };
+  const st = { jobs: 0, ms: 0, hits: 0, misses: 0, svgFallbacks: 0, bytes: 0, decoded: 0, evicted: 0, syncJobs: 0, dropped: 0, resnaps: 0, asyncJobs: 0, asyncMs: 0, asyncFallbacks: 0, prefetched: 0, idleJobs: 0, playMisses: 0, stored: 0, storedBad: 0 };
   const debug = params.get('debug') === '1';
   const SYNC_MS = 40; // a bitmap estimated to cost at most this may be painted on the spot (never inside an input event)
   let running = false, flushQueued = false, busy = 0, useClock = 0;
@@ -483,7 +484,10 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   function toSvgMode() {
     if (mode === 'svg') return;
     mode = 'svg';
-    if (typeof document !== 'undefined') document.querySelectorAll('img[data-k]').forEach(unapply);
+    if (typeof document !== 'undefined') {
+      document.querySelectorAll('img[data-k]').forEach(unapply);
+      document.querySelectorAll('img[data-sprite]').forEach(ensureSvg);
+    }
   }
   // Paint one bitmap (synchronous). Returns an entry or null.
   function bake(id, k, svg) {
@@ -514,8 +518,13 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     learnMs += ms; learnPx += cw * ch;
     return makeEntry(id, k, cw, ch, blob, ms);
   }
-  function makeEntry(id, k, cw, ch, blob, ms) {
-    st.jobs++; st.ms += ms;
+  // (fromStore: loaded from js/raster-cache.js, not painted; painted ones are stored there, when idle)
+  function makeEntry(id, k, cw, ch, blob, ms, fromStore) {
+    if (!fromStore) {
+      st.jobs++; st.ms += ms;
+      const d = disk();
+      if (d) d.put(id, hashOf(id), k, { blob, cw, ch, ms });
+    }
     // decoded: what it costs in memory once shown (the PNG bytes are a fraction of that)
     const entry = { key: keyOf(id, k), id, k, url: URL.createObjectURL(blob), blob, cw, ch, ms, bytes: blob.size, decoded: cw * ch * 4, used: ++useClock };
     // keep a decoded copy referenced so swapping the src is immediate
@@ -537,13 +546,30 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   // so imgs keep PNG blob URLs exactly as before, and a persistent cache can store the same Blob.
   // Up to ASYNC_MAX sprites are painted at once (in parallel on a multi-core device), within
   // ASYNC_PX device pixels in flight (each in flight holds about 3 copies of 4 bytes per pixel).
-  const ASYNC_MAX = 4;
-  const ASYNC_PX = 12e6;
+  // Off-thread rasters run on the browser's worker threads, which also rasterise the page's own
+  // tiles: while the stage is on screen and moving (a scene played or fading out) at most
+  // ASYNC_SHOWN run at once, so its frames still get a thread (4 long rasters froze a fade-out
+  // for a second); behind a cover or under a still preview, up to ASYNC_MAX jobs are under way
+  // (lanes(): js/game.js): a job spends most of its time loading, encoding and decoding rather
+  // than rasterising, so the many small ones of a scene need many in flight to keep the threads
+  // busy (the pixel cap keeps the big ones to a few at a time).
+  const ASYNC_MAX = 12, ASYNC_SHOWN = 2;
+  let asyncLanes = ASYNC_SHOWN;
+  const lanes = (covered) => {
+    asyncLanes = covered ? ASYNC_MAX : ASYNC_SHOWN;
+    asyncPx = covered ? 16e6 : 12e6;
+    if (slotWake) { const w = slotWake; slotWake = null; w(); }
+  };
+  let asyncPx = 12e6; // device pixels in flight at most (each holds about 3 copies of 4 bytes)
   const ON_THREAD_DIFFERS = /rotate\(|skewX|skewY|matrix\(/;
   let asyncReady = null; // Promise<boolean>: off-thread painting is exact here
+  let asyncOk = null;    // its answer once known (until then painting goes ahead off the main thread)
   let inflight = 0, inflightPx = 0, slotWake = null;
   const loadImage = (src) => new Promise((resolve, reject) => {
     const im = new Image();
+    // (ahead of the scene's own imgs, whose plain SVG is only a stand-in: Chromium otherwise loads
+    // those first, and the first scene's long background raster would start some 0.3 s later)
+    im.fetchPriority = 'high';
     im.onload = () => resolve(im);
     im.onerror = () => reject(new Error('load'));
     im.src = src;
@@ -571,22 +597,43 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   }
   // ImageBitmap of the SVG text painted at k (cw x ch), rasterised off the main thread
   const SUPERSEDED = new Error('superseded');
+  let loadingWrappers = 0, rastering = 0;
+  const startWaiters = [];
+  const wrapperLoaded = () => {
+    loadingWrappers--;
+    if (!loadingWrappers || rastering >= 3) while (startWaiters.length) startWaiters.shift()();
+  };
+  // Resolves once the painting under way keeps the worker threads busy (three rasters running, or
+  // every job past loading its image), or after `ms`: the cold preview's own SVG images are loaded
+  // after that, as the page parses those one at a time (js/game.js).
+  function whenPainting(ms) {
+    return new Promise((resolve) => {
+      if ((!loadingWrappers && !queue.length) || rastering >= 3) { resolve(); return; }
+      startWaiters.push(resolve);
+      setTimeout(resolve, ms);
+    });
+  }
   function bitmapOf(text, w, h, k, cw, ch, wanted) {
     const u = wrapper(text, w, h, k, cw, ch);
     if (!u) return Promise.reject(new Error('length'));
     const done = () => URL.revokeObjectURL(u);
     let t0 = 0;
+    loadingWrappers++;
+    let r = false;
     return loadImage(u).then((im) => {
-      if (wanted && !wanted()) throw SUPERSEDED; // (a resize or a newer request since it was queued)
+      if (wanted && !wanted()) { wrapperLoaded(); throw SUPERSEDED; } // (a resize or a newer request since it was queued)
       t0 = performance.now();
+      rastering++; r = true;
+      wrapperLoaded();
       return createImageBitmap(im);
-    }).then((bm) => {
+    }, (e) => { wrapperLoaded(); throw e; }).then((bm) => {
+      rastering--; r = false;
       done();
       // (background raster time: an upper bound for painting it here, on the safe side for estimate())
       learnMs += performance.now() - t0; learnPx += cw * ch;
       if (bm.width !== cw || bm.height !== ch) { if (bm.close) bm.close(); throw new Error('size'); }
       return bm;
-    }, (e) => { done(); throw e; });
+    }, (e) => { if (r) rastering--; done(); throw e; });
   }
   // PNG Blob of an ImageBitmap (the bitmap is handed over: transferred or closed)
   let encoder; // Worker | null (unavailable) | undefined (not tried yet)
@@ -634,6 +681,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
           { d: line([[6, 6], [30, 2], [54, 8]]), k: SEPIA, sw: 2, f: null },
         ];
         const text = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '">' + defs(7) + shapes.map(shapeSvg).join('') + '</svg>';
+        encoderWorker(); // (starting up meanwhile)
         const u = URL.createObjectURL(new Blob([text], { type: 'image/svg+xml' }));
         const svg = await loadImage(u);
         const read = (src, f) => {
@@ -654,6 +702,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
         return alpha > 0; // (and something was painted)
       } catch (e) { return false; }
     })();
+    asyncReady.then((ok) => { asyncOk = ok; });
     return asyncReady;
   }
   const offThread = (id) => !ON_THREAD_DIFFERS.test(sprites[id].text || (sprites[id].text = svgOf(id)));
@@ -678,7 +727,11 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     inflight++; inflightPx += px;
     // superseded jobs (nobody wants them any more, e.g. after a resize) stop before painting or encoding
     bakeAsync(job.id, job.k, () => mode === 'bitmap' && stillWanted(job))
-      .then((e) => (e ? e.pre.decode().catch(() => {}).then(() => e) : null))
+      // (painted before the boot probe had answered: kept only if it says off-thread painting is exact)
+      .then((e) => (asyncOk !== null ? e : asyncCheck().then((ok) => { if (!ok && e) { URL.revokeObjectURL(e.url); e.pre = null; throw new Error('probe'); } return e; })))
+      // (decoded now only if an img wants it: a prefetch is decoded when it is shown, as decoding
+      // runs on the same threads as the painting)
+      .then((e) => (e && job.by.some((r) => r.im) ? predecode(e).then(() => e) : e))
       .catch((err) => { if (err === SUPERSEDED) return null; st.asyncFallbacks++; return 'sync'; })
       .then((e) => {
         if (e !== 'sync') return e;
@@ -701,7 +754,8 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   // Does anyone still want this job's bitmap? (A resize or a new request may have
   // superseded it while it waited, or its img may be gone: then it is not painted.)
   // (prefetches for the old scale are dropped while a resize refit is pending)
-  const stillWanted = (job) => job.direct || job.by.some((r) => r.im.isConnected && ((r.prefetch && !held) || r.im._atWant === job.key));
+  // (a prefetch for a scene or for idle time: while its tag is alive)
+  const stillWanted = (job) => job.direct || job.by.some((r) => (r.tag ? r.tag.alive && !held : r.im.isConnected && ((r.prefetch && !held) || r.im._atWant === job.key)));
   async function runJob(job) {
     if (!stillWanted(job)) return null;
     const svg = await svgImage(job.id);
@@ -710,8 +764,17 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     if (mode !== 'bitmap' || !stillWanted(job)) return null;
     const entry = bake(job.id, job.k, svg);
     if (!entry) { failed.add(job.key); return null; }
-    try { await entry.pre.decode(); } catch (e) { /* shown anyway once loaded */ }
+    await predecode(entry);
     return entry;
+  }
+  // A painted bitmap is decoded before it is put in, so swapping the src is immediate. Chromium
+  // queues img.decode() with the compositor, forcing a frame: while a still preview's SVG is being
+  // rasterised, that frame would wait for it (a second or more, the page frozen), so decodes then
+  // wait until the preview is on screen (holdDecodes: js/game.js).
+  let decodeGate = null;
+  const predecode = (e) => (decodeGate || Promise.resolve()).then(() => (e.pre ? e.pre.decode() : null)).catch(() => {});
+  function holdDecodes(until) {
+    const gate = decodeGate = Promise.resolve(until).catch(() => {}).then(() => { if (decodeGate === gate) decodeGate = null; });
   }
   function store(entry) {
     const old = cache.get(entry.key);
@@ -761,36 +824,44 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     if (running) return;
     running = true;
     try {
-      await selfCheck();
-      const useAsync = await asyncCheck();
+      // The self-checks run meanwhile (started at boot: warm()): a failed one switches to SVG mode,
+      // and off-thread results are kept only once the probe has answered yes (startAsync). Painting
+      // starts at once, so the first scene's big bitmaps are on their way before its imgs exist.
+      selfCheck();
+      asyncCheck();
+      await storeReady(); // (bitmaps stored on an earlier visit are used, not painted again)
       for (;;) {
-        if (!queue.length) { if (!inflight) break; await slot(); continue; }
+        const useAsync = asyncOk !== false && tuning.async && typeof createImageBitmap === 'function';
+        if (!queue.length) { if (!inflight && !loadingStored) break; await slot(); continue; }
+        const i = pick();
+        const job = queue[i];
         // sprites whose scale changes every frame (checkScales: a ratchet shows it magnified until its
         // bitmap arrives; an offer is the step it needs in a few frames) go first, painted here: the
         // background round trip (tens of ms, longer behind big jobs) would show them magnified for frames
-        const u = queue.findIndex((j) => j.by.some((r) => r.urgent));
-        if (u > 0) queue.unshift(queue.splice(u, 1)[0]);
-        const job = queue[0];
-        const urgent = u >= 0;
+        const urgent = job.pri === PRI.urgent;
         let entry = cache.get(job.key) || null; // painted meanwhile (by a tween)
+        // stored on an earlier visit (js/raster-cache.js): loaded, not painted (several at once)
+        const rec = !entry && mode === 'bitmap' && !job.unstored ? stored(job.id, job.k) : null;
+        if (rec) {
+          if (loadingStored >= STORED_MAX) { await slot(); continue; }
+          queue.splice(i, 1);
+          if (stillWanted(job)) startStored(job, rec);
+          else { st.dropped++; jobs.delete(job.key); job.resolve(null); }
+          continue;
+        }
         if (!entry && mode === 'bitmap' && useAsync && !urgent && offThread(job.id)) {
-          const px = pxOf(job);
-          if (inflight >= ASYNC_MAX || (inflight && inflightPx + px > ASYNC_PX)) { await slot(); continue; }
-          queue.shift();
+          const px = job.px;
+          // (idle-time prefetches only while nothing else is being painted, one at a time)
+          if (inflight >= asyncLanes || (inflight && inflightPx + px > asyncPx) || (job.pri === PRI.idle && inflight)) { await slot(); continue; }
+          queue.splice(i, 1);
           if (stillWanted(job)) { startAsync(job, px); continue; }
           st.dropped++;
           jobs.delete(job.key);
           job.resolve(null);
           continue;
         }
-        queue.shift();
-        if (!entry && mode === 'bitmap') {
-          try { entry = await runJob(job); } catch (e) { entry = null; }
-          if (entry) store(entry);
-          else if (!failed.has(job.key)) st.dropped++;
-        }
-        jobs.delete(job.key);
-        job.resolve(entry);
+        queue.splice(i, 1);
+        await runHere(job, entry);
       }
     } finally {
       running = false;
@@ -801,21 +872,90 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   // {im} when an img asked for it (painted only while it still wants it), {im, prefetch}
   // for a bitmap an img may use soon (painted while the img is connected), nothing for a
   // direct caller (always painted). Resolves null when it could not or need not be painted.
+  // by.tag: {alive, pri} of a prefetch (prefetchScene, idlePrefetch).
   function rasterize(id, k, by) {
     const key = keyOf(id, k);
     const hit = cache.get(key);
     if (hit) return Promise.resolve(hit);
     let job = jobs.get(key);
+    const px = pxOf({ id, k });
+    const pri = !by ? PRI.img : by.urgent ? PRI.urgent : by.tag ? (by.tag.pri === PRI.scene && px > BIG_PX ? PRI.img : by.tag.pri) : PRI.img;
     if (!job) {
-      job = { id, k, key, by: [], direct: false };
+      job = { id, k, key, by: [], direct: false, pri, px };
       job.promise = new Promise((resolve) => { job.resolve = resolve; });
       jobs.set(key, job);
       queue.push(job);
       if (slotWake) { const w = slotWake; slotWake = null; w(); } // (pump may be waiting for a free slot)
       pump();
-    }
+    } else if (pri < job.pri) job.pri = pri;
     if (by) job.by.push(by); else job.direct = true;
     return job.promise;
+  }
+  // ----- bitmaps stored on an earlier visit -----
+  // A hit is a PNG blob on disk: its img only has to decode it (off the main thread). Its size is
+  // checked once it has loaded (a record of the wrong size is deleted and the bitmap painted again).
+  const STORED_MAX = 8;
+  let loadingStored = 0;
+  function stored(id, k) {
+    const d = disk();
+    return d && sprites[id] ? d.get(id, hashOf(id), k) : null;
+  }
+  function startStored(job, rec) {
+    loadingStored++;
+    const sp = sprites[job.id];
+    const cw = Math.ceil(sp.box[2] * job.k - 1e-6), ch = Math.ceil(sp.box[3] * job.k - 1e-6);
+    const e = makeEntry(job.id, job.k, cw, ch, rec.blob, rec.ms || 0, true);
+    // decoded now if an img wants it (else only loaded, enough to know its size)
+    const ready = job.by.some((r) => r.im) ? predecode(e) : new Promise((r) => { if (e.pre.complete) r(); else { e.pre.onload = r; e.pre.onerror = r; } });
+    ready.then(() => {
+      const ok = e.pre && e.pre.naturalWidth === cw && e.pre.naturalHeight === ch;
+      if (!ok) {
+        // wrong size or unreadable: forget it and paint it
+        st.storedBad++;
+        if (disk()) disk().drop(rec);
+        URL.revokeObjectURL(e.url);
+        job.unstored = true;
+        queue.push(job);
+        pump();
+        return;
+      }
+      st.stored++;
+      if (disk()) disk().touch(rec);
+      if (mode === 'bitmap') store(e);
+      jobs.delete(job.key);
+      job.resolve(mode === 'bitmap' ? e : null);
+    }).finally(() => {
+      loadingStored--;
+      const w = slotWake; slotWake = null;
+      if (w) w();
+      checkIdle();
+    });
+  }
+  // Paint a job on the page's own thread (synchronously, between tasks).
+  async function runHere(job, entry) {
+    entry = entry || cache.get(job.key) || null;
+    if (!entry && mode === 'bitmap') {
+      try { entry = await runJob(job); } catch (e) { entry = null; }
+      if (entry) store(entry);
+      else if (!failed.has(job.key)) st.dropped++;
+    }
+    jobs.delete(job.key);
+    job.resolve(entry);
+  }
+  // Which queued job next: the most urgent class first (PRI), and within it the biggest, so that on
+  // several threads the long jobs start first and the scene is ready soonest (a 2 s background
+  // started last would finish alone). A scene's manifest (prefetchScene) comes after its imgs (they
+  // must be in before it is uncovered; the rest only before it plays), except its big bitmaps (over
+  // a megapixel: close-ups), which start with the scene's own big ones.
+  const PRI = { urgent: 0, img: 1, scene: 2, idle: 3 };
+  const BIG_PX = 1e6;
+  function pick() {
+    let b = 0;
+    for (let i = 1; i < queue.length; i++) {
+      const j = queue[i], q = queue[b];
+      if (j.pri < q.pri || (j.pri === q.pri && j.px > q.px)) b = i;
+    }
+    return b;
   }
   // estimated ms to paint sprite id at k (from the jobs so far)
   function estimate(id, k) {
@@ -834,7 +974,9 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       const kNow = scaleOf(M);
       // made for this scale: map exactly one bitmap pixel to one device pixel
       if (Math.abs(kNow / e.k - 1) < 0.002) s = kNow;
-      if (tuning.snap && axisAligned(M)) {
+      // (not under a scale tween: an offset worked out at one scale is wrong at the next, e.g. a card
+      // popping open from 0.01; the tween's exact refit snaps it when it ends)
+      if (tuning.snap && axisAligned(M) && !underTween(im)) {
         nx = (Math.round(M.e) - M.e) / M.a;
         ny = (Math.round(M.f) - M.f) / M.d;
       }
@@ -853,6 +995,22 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     im.dataset.k = e.k;
     e.used = ++useClock;
   }
+  // An img made in bitmap mode has no src until it is fitted: then it gets its bitmap if that is
+  // ready, else its SVG (ensureSvg: shown until the bitmap is painted, as it looks the same). A scene
+  // built behind its cover and fitted there (deferred) never loads its sprites' SVG documents at all:
+  // parsing them costs the page about 3 ms each (1 s for a scene at 4x CPU), and holds up loading
+  // the images that painting needs. An img without src shows nothing (alt '').
+  function ensureSvg(im) {
+    if (im.getAttribute('src')) return;
+    const id = im.dataset.sprite;
+    if (sprites[id]) im.src = url(id);
+  }
+  // SVG for every shown img under root that has no bitmap yet (a still preview: js/game.js; hidden
+  // face variants and parts stay as they are, as nothing moves until the bitmaps are in)
+  function showSvg(root) {
+    if (!root || !root.querySelectorAll) return;
+    for (const im of root.querySelectorAll('img[data-sprite]')) if (im.offsetParent !== null) ensureSvg(im);
+  }
   // back to the plain SVG image
   function unapply(im) {
     const sp = sprites[im.dataset.sprite];
@@ -870,14 +1028,20 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   function want(im, k, defer, urgent) {
     const id = im.dataset.sprite;
     if (tuning.oversample !== 1) k = round3(k * tuning.oversample);
-    if (!sprites[id] || !(k >= 0.01) || !isFinite(k)) return null;
+    if (!sprites[id] || !(k >= 0.01) || !isFinite(k)) { if (!defer) ensureSvg(im); return null; } // (scale 0: SVG, as before)
     const key = keyOf(id, k);
     im._atWant = key;
     const hit = cache.get(key);
     if (hit) { st.hits++; apply(im, hit); return null; }
     st.misses++;
+    if (!defer) ensureSvg(im); // (deferred: a scene behind its cover, put in at the end)
+    if (playing && !cache.has(key) && !jobs.has(key)) {
+      // painted during play: the scene's manifest (js/sprite-manifest.js) does not list it
+      st.playMisses++;
+      if (debug) console.warn('[AT.art] painted during play:', key);
+    }
     busy++;
-    return rasterize(id, k, { im, urgent: !!urgent }).then((entry) => {
+    return rasterize(id, k, { im, urgent: !!urgent, defer: !!defer }).then((entry) => {
       if (!defer && entry && im._atWant === key && mode === 'bitmap' && im.dataset.sprite === id && byUrl.has(entry.url)) {
         // painted for the scale it had when asked (off the main thread that can be some frames ago):
         // if it has grown since (a pulse), it would be shown magnified: ask for the step above instead
@@ -911,16 +1075,16 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     if (im._atWant === key && jobs.has(key)) return; // already on its way (SVG meanwhile)
     if (!e) e = cache.get(key);
     const cheap = estimate(id, kk) <= SYNC_MS, input = inInput();
-    if (!e && !failed.has(key) && !jobs.has(key) && cheap && svgReady.has(id) && !input) {
+    if (!e && !failed.has(key) && !jobs.has(key) && cheap && svgReady.has(id) && !input && !stored(id, kk)) {
       e = bake(id, kk, svgReady.get(id));
       if (e) { st.syncJobs++; store(e); }
     }
     im._atWant = key;
     if (e && e.pre && e.pre.complete) { st.hits++; apply(im, e); return; }
-    if (kb) unapply(im); // SVG until the bitmap is ready
+    if (kb) unapply(im); else ensureSvg(im); // SVG until the bitmap is ready
     if (e) {
       busy++;
-      e.pre.decode().catch(() => {}).then(() => { if (im._atWant === key && byUrl.has(e.url)) apply(im, e); })
+      predecode(e).then(() => { if (im._atWant === key && byUrl.has(e.url)) apply(im, e); })
         .finally(() => { busy--; checkIdle(); });
     } else if (!failed.has(key) && (async === 'always' || (async === 'input' && cheap && input))) {
       busy++;
@@ -985,7 +1149,8 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     return kFrom(raw, n);
   }
   function fitOne(im, pass, defer) {
-    if (mode !== 'bitmap' || underTween(im)) return null; // tweens refit when they end
+    if (mode !== 'bitmap') return null;
+    if (underTween(im)) { ensureSvg(im); return null; } // tweens refit when they end
     const [raw, n] = wantedRaw(im, pass);
     note(im.dataset.sprite, raw, n);
     return want(im, kFrom(raw, n), defer);
@@ -994,6 +1159,8 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   // (or have stayed SVG). opts.onProgress(fraction) reports painted area (cw*ch) over the total.
   // opts.defer: bitmaps that are not cached yet are painted but not put in (a later fit does
   // that, all at once).
+  // opts.scene: also paint every bitmap that scene's manifest lists (prefetchScene), counted in
+  // the progress too.
   function fit(root, opts = {}) {
     if (mode !== 'bitmap' || !root || !root.querySelectorAll) return Promise.resolve();
     evict(null); // (a scene change has just let go of the last scene's bitmaps)
@@ -1002,19 +1169,128 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     const waits = [];
     let total = 0, done = 0;
     const report = () => { if (opts.onProgress) { try { opts.onProgress(total ? done / total : 1); } catch (e) { /* ignore */ } } };
+    const count = (p, px) => { total += px; waits.push(p.then(() => { done += px; report(); })); };
     for (const im of imgs) {
       pendingFit.delete(im);
       const p = fitOne(im, pass, opts.defer);
       if (!p) continue;
       const b = sprites[im.dataset.sprite].box, k = kWanted(im, pass);
-      const area = b[2] * b[3] * k * k;
-      total += area;
-      waits.push(p.then(() => { done += area; report(); }));
+      count(p, b[2] * b[3] * k * k);
     }
+    if (opts.scene) for (const [p, px] of prefetchScene(opts.scene)) count(p, px);
     report();
     checkIdle();
     return Promise.all(waits).then(() => {});
   }
+  // ----- prefetching from the scene manifest (js/sprite-manifest.js, tools/sprite-manifest.mjs) -----
+  // The bitmaps a scene asks for while it is played, as [id, k] for this screen: [id, s] is the
+  // exact scale s x stage scale x devicePixelRatio, [id, s, n] the 2^(1/n) step at or above it,
+  // [id, lo, hi, n] every step from lo to hi (particles); random exact scales ([id, lo, hi, 0]:
+  // balloons, soap bubbles) cannot be painted ahead.
+  function sceneList(name) {
+    const m = typeof window !== 'undefined' && window.AT_SPRITES && window.AT_SPRITES.scenes[name];
+    const out = [];
+    if (!m) return out;
+    const u = unitScale();
+    for (const e of m) {
+      const id = e[0];
+      if (!sprites[id]) continue;
+      if (e.length === 2) out.push([id, round3(e[1] * u)]);
+      else if (e.length === 3) out.push([id, bucketUp(e[1] * u, e[2])]);
+      else if (e[3] > 0) {
+        const n = e[3], j1 = Math.ceil(n * Math.log2(e[2] * u) - 1e-6);
+        for (let j = Math.ceil(n * Math.log2(e[1] * u) - 1e-6); j <= j1; j++) out.push([id, round3(Math.pow(2, j / n))]);
+      }
+    }
+    return out;
+  }
+  // Paint the bitmaps scene `name` will ask for (behind its entry cover: js/game.js AT.go, through
+  // fit(..., {scene})), after the ones its imgs need now. Returns [[promise, px]] of those not painted yet.
+  let sceneTag = { alive: false };
+  function prefetchScene(name) {
+    // (again for the same scene: the same requests; another scene: the last one's are dropped)
+    if (!(sceneTag.alive && sceneTag.name === name)) {
+      sceneTag.alive = false;
+      sceneTag = { alive: true, pri: PRI.scene, name };
+    }
+    const out = [];
+    // (not while recording what scenes ask for: tools/sprite-manifest.mjs)
+    if (mode !== 'bitmap' || spriteLog) return out;
+    for (const [id, k] of sceneList(name)) {
+      const key = keyOf(id, k);
+      if (!(k >= 0.01) || cache.has(key) || failed.has(key)) continue;
+      const job = jobs.get(key);
+      if (job && job.by.some((r) => r.tag === sceneTag)) { out.push([job.promise, job.px]); continue; } // (asked for already)
+      if (!job) st.prefetched++;
+      out.push([rasterize(id, k, { tag: sceneTag }), pxOf({ id, k })]);
+    }
+    return out;
+  }
+  // In idle time while scene `name` is played (null: stop), paint the small bitmaps (estimated at
+  // most SYNC_MS) of the scenes that can follow it (AT_SPRITES.next), one at a time and only while
+  // nothing else is being painted, so the next scene's cover is shorter. Big ones (backgrounds,
+  // the mouth close-up) wait for that scene's cover. Live play only (?manual and recordings wait
+  // for idle() at every step, which this would hold up).
+  let idleTag = { alive: false };
+  const whenIdle = (fn) => (typeof requestIdleCallback === 'function' ? requestIdleCallback(fn, { timeout: 1000 }) : setTimeout(() => fn(null), 50));
+  function idlePrefetch(name) {
+    idleTag.alive = false;
+    const E = AT.engine;
+    if (!name || mode !== 'bitmap' || !E || E.manual || E.recording || params.get('nop2')) return;
+    const tag = idleTag = { alive: true, pri: PRI.idle };
+    const seen = new Set(), list = [];
+    const next = (window.AT_SPRITES && window.AT_SPRITES.next[name]) || [];
+    for (const sc of next) {
+      for (const [id, k] of sceneList(sc)) {
+        const key = keyOf(id, k);
+        if (seen.has(key) || !(k >= 0.01)) continue;
+        seen.add(key);
+        list.push([id, k, key]);
+      }
+    }
+    const step = (deadline) => {
+      if (!tag.alive) return;
+      while (list.length) {
+        const [id, k, key] = list[0];
+        if (cache.has(key) || jobs.has(key) || failed.has(key) || estimate(id, k) > SYNC_MS) { list.shift(); continue; }
+        // only when nothing else is painting, within the idle period, and well within the memory budget
+        if (running || inflight || st.decoded > budget() / 2) break;
+        if (deadline && estimate(id, k) > deadline.timeRemaining() && !deadline.didTimeout) break;
+        list.shift();
+        st.idleJobs++;
+        rasterize(id, k, { tag }).then(() => { if (tag.alive) whenIdle(step); });
+        return;
+      }
+      if (list.length) whenIdle(step);
+    };
+    whenIdle(step);
+  }
+  // Is a scene being played (not loading behind a cover)? Bitmaps painted then are counted (stats().playMisses).
+  let playing = false;
+  const play = (on) => { playing = !!on; };
+
+  // ----- bitmaps stored across visits (js/raster-cache.js: IndexedDB) -----
+  const disk = () => (mode === 'bitmap' && typeof AT !== 'undefined' && AT.rasterCache) || null;
+  let diskLoad = null;
+  // At boot: the self-checks, the PNG encoder worker and reading the stored bitmaps all start
+  // at once, while the first scene is built (painting waits for them).
+  function warm() {
+    if (mode !== 'bitmap') return;
+    selfCheck();
+    asyncCheck();
+    storeReady();
+  }
+  // Resolves once the stored bitmaps are known (or there are none): AT.boot starts it, AT.go waits for it.
+  function storeReady() {
+    if (!diskLoad) diskLoad = disk() ? disk().load().catch(() => false) : Promise.resolve(false);
+    return diskLoad;
+  }
+  // store the bitmaps painted since the last call, when the browser is idle (after a scene has faded in)
+  function persist() { const d = disk(); if (d) d.flushSoon(); }
+  // once a session: forget stored bitmaps of drawings that have changed (js/raster-cache.js)
+  function housekeep() { const d = disk(); if (d) d.housekeep((id) => (sprites[id] ? hashOf(id) : null)); }
+  const hashOf = (id) => { const sp = sprites[id]; if (!sp.hash) sp.hash = hashStr(sp.text || (sp.text = svgOf(id))).toString(36); return sp.hash; };
+
   // new imgs (Node constructor, puppets, swap, particles) are fitted right after the code that made them
   function schedule(el) {
     pendingFit.add(el);
@@ -1127,7 +1403,8 @@ ${ink('ks', 1.6, 1.6, 0.25)}
         im._atMoved = t;
         if (held) continue;
         const kb = +im.dataset.k || 0;
-        if (!kb || kmaxOf(im) || underTween(im) || settling(im)) continue; // SVG is exact; particles and tweens are handled apart
+        if (!kb) { if (!(im._atWant && jobs.has(im._atWant))) ensureSvg(im); continue; } // SVG is exact (the sweep paints it)
+        if (kmaxOf(im) || underTween(im) || settling(im)) continue; // particles and tweens are handled apart
         const M0 = deviceMatrix(im, pass), raw = M0 ? scaleOf(M0) : 0, kd = round3(raw);
         if (!(kd >= 0.01)) continue;
         if (kd > kb * 1.01) { note(im.dataset.sprite, raw, 32); if (!useCached(im, kd, pass)) ratchet(im, kd); }
@@ -1256,7 +1533,8 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       } else if (kd > kb * 1.01) {
         note(id, raw, 32);
         if (!useCached(im, kd, pass)) ratchet(im, kd);
-      } else if (!near(kb, kd) && prev && near(prev, kd) && !(t - lastMoved(im) < REST)) {
+      } else if (!near(kb, kd) && prev && near(prev, kd) && !(t - lastMoved(im) < REST) && !invisible(im)) {
+        // (a sprite nobody can see - opacity 0, display none - is settled once it is shown)
         note(id, raw, 0);
         if (!(pending && im._atWant === keyOf(id, kd))) want(im, kd);
       } else if (still) resnapOne(im, pass, M);
@@ -1305,6 +1583,14 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     }
   }
 
+  // hidden by an inline display:none or opacity 0 on the way up (cheap: no computed styles)
+  function invisible(im) {
+    for (let el = im; el && el !== document.body; el = el.parentElement) {
+      const s = el.style;
+      if (s.display === 'none' || (s.opacity !== '' && +s.opacity === 0)) return true;
+    }
+    return false;
+  }
   // ----- audit: visible sprites that break the invariant -----
   // Visible: no display:none or opacity 0 on the way to the root, not under a
   // running scale tween, and on screen. Returns [{id, kDisplay, kBitmap, offGrid?}].
@@ -1349,7 +1635,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       if (underTween(im)) continue;
       const k = round3(kWanted(im, pass));
       const key = keyOf(im.dataset.sprite, k);
-      if (k >= 0.01 && !cache.has(key) && !failed.has(key)) return false;
+      if (k >= 0.01 && !cache.has(key) && !failed.has(key) && !stored(im.dataset.sprite, k)) return false;
     }
     return true;
   }
@@ -1405,13 +1691,15 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     }
     return { ...st, ms: Math.round(st.ms), cached: cache.size, budget: budget(), inUseDecoded: inUse, mode };
   }
-  // the scales sprite id is cached at (tests)
+  // the scales sprite id is cached at, and every cached bitmap's key (tests)
   const cachedScales = (id) => [...(byId.get(id) || [])].map((e) => e.k).sort((a, b) => a - b);
+  const cachedKeys = () => [...cache.keys()];
 
   return {
     define, img, url, svgOf, box, has, list,
     get mode() { return mode; },
-    fit, idle, stats, cachedScales, setSprite, shows, kOf, kPeak, deviceMatrix, rasterize, estimate, tweenStart, tweenEnd, spriteLog: spriteLogRows,
+    fit, idle, stats, cachedScales, cachedKeys, setSprite, shows, kOf, kPeak, deviceMatrix, rasterize, estimate, tweenStart, tweenEnd, spriteLog: spriteLogRows,
+    sceneList, prefetchScene, idlePrefetch, play, warm, storeReady, persist, housekeep, showSvg, whenPainting, holdDecodes, lanes,
     sweep, audit, ready, cost, track, scaleChanged, resnapSoon, resized, hold, inexactToSvg,
     C, E, R, smooth, blob, fluff, puffs, star, heart, line, rng, group,
     mix, inkOf, shade, tint, SEPIA,

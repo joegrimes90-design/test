@@ -73,10 +73,19 @@ AT.engine = (() => {
   }
   E.dueTimers = () => timers.some((tm) => tm.t <= E.time + 1e-9);
 
+  // The clock stands still while anything holds it: E.hold(reason, on). Reasons (js/game.js):
+  // 'build' (a scene being painted behind its cover), 'preview' (the cold first visit's still
+  // title), 'refit' (sprites repainted after a resize). E.paused is true while any holds.
+  const holds = new Set();
+  E.paused = false;
+  E.hold = (why, on) => {
+    if (on) holds.add(why); else holds.delete(why);
+    E.paused = holds.size > 0;
+  };
   let last = 0;
   function frame(now) {
     if (!E.recording && !E.manual) requestAnimationFrame(frame);
-    // paused (sprites being repainted behind a cover after a resize): the clock stands still
+    // paused: the clock stands still
     if (E.paused) { last = now; return; }
     const dt = last ? Math.min(0.05, (now - last) / 1000) : 1 / 60;
     last = now;
@@ -485,33 +494,47 @@ AT.engine = (() => {
   };
 
   // ---------- screen transitions ----------
-  // E.cover: the same paper fade on the wall clock, for when the game clock is paused
-  // (While it fades, #fade is on its own compositor layer, so the still stage under it is not
-  // repainted every frame; it is the stage's last child, so this creates no overlap layers.)
-  E.cover = (opacity, dur = 0.25) => new Promise((resolve) => {
-    const from = parseFloat(E.fade.style.opacity || getComputedStyle(E.fade).opacity || 0);
+  // The paper #fade over the stage. It is the stage's last child and composited (will-change:
+  // opacity in css/style.css; no overlap layers can result), so the stage under it is not
+  // repainted while it fades, and it is display:none whenever it has faded out.
+  // E.fadeTo: in live play on the wall clock, so a fade keeps its designed length on a slow
+  // device and also runs while the game clock is held; in tests (?manual) and recordings on
+  // the engine clock, frame by frame as before. E.cover: always the wall clock (for when the
+  // game clock is held).
+  let fadeSeq = 0;
+  const fadeStart = (opacity) => {
+    E.fade.style.display = '';
     E.fade.style.pointerEvents = opacity > 0 ? 'auto' : 'none';
-    E.fade.style.willChange = 'opacity';
+    return ++fadeSeq;
+  };
+  // (a newer fade may have started meanwhile: then it decides)
+  const fadeEnd = (seq, opacity) => { if (seq === fadeSeq && opacity <= 0) E.fade.style.display = 'none'; };
+  const wallFade = (from, opacity, dur) => new Promise((resolve) => {
+    const seq = fadeStart(opacity);
+    // at once (also when it is already there: no frames that change nothing)
+    if (!(dur > 0) || from === opacity) { E.fade.style.opacity = opacity; fadeEnd(seq, opacity); resolve(); return; }
     const t0 = performance.now();
     const f = (now) => {
+      if (seq !== fadeSeq) { resolve(); return; } // superseded by a newer fade
       const p = Math.min(1, (now - t0) / (dur * 1000));
       E.fade.style.opacity = (from + (opacity - from) * ease.inOut(p)).toFixed(3);
-      if (p < 1) requestAnimationFrame(f); else { E.fade.style.willChange = ''; resolve(); }
+      if (p < 1) requestAnimationFrame(f); else { fadeEnd(seq, opacity); resolve(); }
     };
     requestAnimationFrame(f);
   });
+  E.cover = (opacity, dur = 0.25) => wallFade(parseFloat(E.fade.style.opacity || getComputedStyle(E.fade).opacity || 0), opacity, dur);
   E.fadeTo = (opacity, dur = 0.45) => {
-    const st = { v: parseFloat(E.fade.style.opacity || 0) };
-    E.fade.style.pointerEvents = opacity > 0 ? 'auto' : 'none';
+    const from = parseFloat(E.fade.style.opacity || 0);
+    if (!E.manual && !E.recording) return wallFade(from, opacity, dur / (E.speed || 1));
+    const seq = fadeStart(opacity);
     return new Promise((resolve) => {
       const start = E.time;
-      const from = st.v;
       const u = {
         token: { alive: true },
         fn: () => {
           const p = Math.min(1, (E.time - start) / dur);
           E.fade.style.opacity = (from + (opacity - from) * ease.inOut(p)).toFixed(3);
-          if (p >= 1) { remove(u); resolve(); }
+          if (p >= 1) { remove(u); fadeEnd(seq, opacity); resolve(); }
         },
       };
       updaters.push(u);

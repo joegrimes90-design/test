@@ -47,25 +47,42 @@
   AT.hideCaption = hideCaption;
 
   // ---------- scene manager ----------
-  let going = false;
+  // AT.go(name): fade to paper, build the scene behind the cover (the stage hidden: nothing
+  // under the cover paints, and in live play the clock stands still), paint its sprite bitmaps
+  // and every other bitmap its manifest lists (js/sprite-manifest.js: close-ups, celebrations,
+  // particles, thought bubbles, so nothing is painted during play), then fade in. On a cold
+  // first visit (live play, bitmaps for the first scene neither painted nor stored) the scene
+  // is shown at once, still, with its plain SVG sprites and a progress pill, while the bitmaps
+  // are painted; they go in all at once and then the clock starts (coldPreview). Once a scene
+  // is shown, the small sprites of the scenes that can follow are painted in idle time.
+  let going = false, goSeq = 0, previewing = false;
   AT.sceneName = null;
   const mark = (n) => { try { performance.mark(n); } catch (e) { /* old browsers */ } };
   AT.mark = mark;
+  const live = () => !E.manual && !E.recording;
   AT.go = async (name, params = {}) => {
     if (going) return;
     going = true;
+    const seq = ++goSeq;
+    const first = !AT.sceneName;
     mark(`at:go:${name}`);
     AT.audio.prefetch(name);
+    AT.art.play(false);
+    AT.art.idlePrefetch(null); // (not while a scene is loading)
+    // start painting what the scene's manifest lists now, while the last scene fades out
+    const manifest = AT.art.prefetchScene(name);
     if (AT.sceneName) await E.fadeTo(1, 0.35);
     mark(`at:faded:${name}`);
     // Nothing under the cover paints while the scene is built and its sprite bitmaps
-    // are painted (live SVG frames would compete with the baking for the CPU).
+    // are painted (live SVG frames would compete with the painting for the CPU).
     E.stage.classList.add('covered');
+    // all lanes behind the cover (the first scene: once it is known whether it is previewed)
+    if (!first) AT.art.lanes(true);
     // Live play: the clock stands still while the scene is built and painted behind the cover.
     // (Sprites are painted off the main thread, so frames keep running meanwhile: the scene's
     // animations would otherwise run on hidden, and oscillating sprites ask for new bitmaps.)
-    const stillWhileBuilding = !E.manual && !E.recording && !E.paused;
-    if (stillWhileBuilding) E.paused = true;
+    if (live()) E.hold('build', true);
+    E.hold('preview', false); // (a cold preview still painting: this scene replaces it)
     E.newToken();
     AT.audio.stopVoice();
     voiceEnd = 0;
@@ -81,21 +98,132 @@
     document.body.dataset.scene = name;
     const ctx = sc.build(params) || {};
     mark(`at:dom:${name}`);
-    // paint the scene's sprite bitmaps (the first scene drives the loading bar)
+    // Paint the scene's sprite bitmaps, all put in at once at the end: started right away (before the
+    // new imgs' own fit, which would put each in as soon as it is painted). The first scene drives the
+    // loading bar or the preview's pill; the preview also waits for the manifest (scene: name).
+    let progress = null;
     const bar = document.querySelector('#loading .fill');
-    await AT.art.fit(E.stage, { onProgress: bar ? (p) => { bar.style.width = (p * 100).toFixed(1) + '%'; } : null });
+    const painting = AT.art.fit(E.stage, { scene: first ? name : null, defer: true, onProgress: (p) => { if (progress) progress(p); } });
+    if (bar) progress = (p) => { bar.style.transform = `scaleX(${p.toFixed(3)})`; };
+    // bitmaps painted on an earlier visit (IndexedDB), if the browser keeps them
+    await AT.art.storeReady();
+    if (first && live() && AT.art.mode === 'bitmap' && !AT.art.ready(E.stage)) return coldPreview(name, sc, ctx, params, seq, painting, (f) => { progress = f; });
+    AT.art.lanes(true);
+    await painting;
+    await AT.art.fit(E.stage);
     mark(`at:raster:${name}`);
     const loading = document.getElementById('loading');
     if (loading) loading.remove();
     await AT.imagesReady(E.stage, 10000);
-    if (stillWhileBuilding) E.paused = false;
+    E.hold('build', false);
     E.stage.classList.remove('covered');
+    mark(`at:built:${name}`);
+    // the rest of the manifest (close-ups, celebrations, particles) by the time the scene plays: at
+    // the latest while it fades in (nothing is painted once it plays; small ones by then, so the
+    // fade's own frames still get through)
+    await Promise.all([E.fadeTo(0, 0.45), ...manifest.map((m) => m[0])]);
+    AT.art.lanes(false);
+    mark(`at:shown:${name}`);
+    if (first) mark(`at:live:${name}`);
+    going = false;
+    shown(name);
+    E.spawn(() => sc.run(ctx, params));
+  };
+  // A cold first visit: the scene still, as SVG, while its bitmaps are painted. Nothing moves, so
+  // the SVG is rasterised once; a tap is taken (the title's wait for it ends) and the scene goes on
+  // when the clock starts.
+  async function coldPreview(name, sc, ctx, params, seq, painting, onProgress) {
+    previewing = true;
+    E.hold('preview', true);
+    E.hold('build', false);
+    // the scene's plain SVG images, loaded once the first big bitmaps are being painted (the page
+    // parses those SVG documents one after another, which would hold up the painting's own images)
+    await AT.art.whenPainting(500);
+    AT.art.showSvg(E.stage);
+    // all loaded before it is shown: then it is rasterised once (an image arriving later would
+    // repaint it, and that change would wait for the raster under way)
+    await AT.imagesReady(E.stage, 1500);
+    E.stage.classList.remove('covered');
+    const loading = document.getElementById('loading');
+    if (loading) loading.remove();
+    const pill = progressPill();
+    pill.show();
+    AT.art.lanes(true); // (still: the page's own frames need little)
+    // Progress shows only once the still scene is on screen: until its SVG has been rasterised
+    // (a second or more), any other change to the page would wait for that, freezing the page.
+    // (Its largest image being painted: largest-contentful-paint; else after 3 s.)
+    let onScreen = false;
+    const presented = whenPresented(3000).then(() => { onScreen = true; });
+    AT.art.holdDecodes(presented); // (the same for the painted bitmaps' decodes)
+    onProgress((p) => { if (onScreen) pill.set(p); });
     mark(`at:built:${name}`);
     await E.fadeTo(0, 0.45);
     mark(`at:shown:${name}`);
+    const shownAt = performance.now();
     going = false;
     E.spawn(() => sc.run(ctx, params));
-  };
+    const current = () => seq === goSeq;
+    try {
+      // every bitmap painted first (a resize meanwhile: again, for the new scale), then put in at
+      // once, so the tiles showing SVG are rasterised again only once
+      await painting;
+      while (current() && !AT.art.ready(E.stage)) await AT.art.fit(E.stage, { scene: name, defer: true, onProgress: (p) => pill.set(p) });
+      // (tests/e2e/loading.spec.mjs: a preview long enough to tap or resize during it)
+      if (tun.previewMinMs > 0) await wallWait(tun.previewMinMs - (performance.now() - shownAt));
+      if (current()) {
+        await AT.art.fit(E.stage);
+        await AT.imagesReady(E.stage, 10000);
+        mark(`at:raster:${name}`);
+        // the clock starts once the swapped stage is drawn and frames flow again (a slow device
+        // otherwise drops frames in the scene's first half second)
+        await smoothFrames(600);
+      }
+    } finally {
+      pill.hide();
+      previewing = false;
+      if (current()) {
+        E.hold('preview', false);
+        AT.art.lanes(false);
+        mark(`at:live:${name}`);
+        shown(name);
+      }
+    }
+  }
+  // Resolves after three animation frames in a row at (nearly) the display rate, or after ms.
+  function smoothFrames(ms) {
+    return new Promise((resolve) => {
+      const t0 = performance.now();
+      let last = 0, good = 0;
+      const f = (now) => {
+        good = last && now - last < 20 ? good + 1 : 0;
+        last = now;
+        if (good >= 3 || now - t0 > ms) resolve(); else requestAnimationFrame(f);
+      };
+      requestAnimationFrame(f);
+    });
+  }
+  // Resolves when a frame painted from now on has reached the screen (its largest image's
+  // largest-contentful-paint entry), or after ms (browsers without that API).
+  function whenPresented(ms) {
+    const t0 = performance.now();
+    return new Promise((resolve) => {
+      setTimeout(resolve, ms);
+      try {
+        const po = new PerformanceObserver((list) => {
+          if (list.getEntries().some((e) => e.startTime >= t0)) { po.disconnect(); resolve(); }
+        });
+        po.observe({ type: 'largest-contentful-paint', buffered: false });
+      } catch (e) { /* no largest-contentful-paint here */ }
+    });
+  }
+  // after a scene has faded in: store new bitmaps (when idle), paint the next scenes' small
+  // sprites in idle time, and once a session tidy the stored bitmaps
+  function shown(name) {
+    AT.art.play(true);
+    AT.art.persist();
+    AT.art.idlePrefetch(name);
+    if (name === 'hub') AT.art.housekeep();
+  }
 
   // ---------- resizes: sprite bitmaps follow the new device scale ----------
   // (E.onResized is called by the engine on resize, rotation, fullscreen and zoom.)
@@ -114,22 +242,22 @@
   const tun = window.__AT_RASTER_TUNING || {};
   const REFIT_COVER_MAX = tun.refitCoverMs >= 0 ? tun.refitCoverMs : 1000;
   let refitTimer = 0, refitDone = null, refits = Promise.resolve(), refitCovered = false, coveredAt = 0;
-  const live = () => !E.manual && !E.recording;
   function pauseForRefit() {
     refitCovered = true;
     coveredAt = performance.now();
     mark('at:refit:cover');
-    E.paused = true;
+    E.hold('refit', true);
     if (AT.audio.hold) AT.audio.hold(true);
   }
   E.onResized = () => {
     if (AT.art.mode !== 'bitmap') return;
+    AT.art.idlePrefetch(null); // (again once the new size is painted)
     const toSvg = AT.art.resized(E.stage);
     if (!refitDone) AT.art.track(new Promise((r) => { refitDone = r; }));
-    if (toSvg && live() && AT.sceneName && !going && !refitCovered) {
+    // (a cold preview repaints for the new scale by itself)
+    if (toSvg && live() && AT.sceneName && !going && !refitCovered && !previewing) {
       pauseForRefit();
-      E.fade.style.opacity = 1;
-      E.fade.style.pointerEvents = 'auto';
+      E.cover(1, 0); // at once
       E.stage.classList.add('covered');
     }
     clearTimeout(refitTimer);
@@ -138,9 +266,16 @@
   const wallWait = (ms) => new Promise((r) => setTimeout(r, ms));
   // 'Getting the paints ready…' pill above the stage (outside it: it never repaints the stage)
   function progressPill() {
-    let el = null, fill = null, p = 0;
+    let el = null, fill = null, p = 0, at = 0;
     return {
-      set(v) { p = v; if (fill) fill.style.transform = `scaleX(${Math.max(0, Math.min(1, p)).toFixed(3)})`; },
+      // (a few times a second at most: every change is a frame the compositor must take)
+      set(v) {
+        p = v;
+        const now = performance.now();
+        if (!fill || (now - at < 250 && p < 1)) return;
+        at = now;
+        fill.style.transform = `scaleX(${Math.max(0, Math.min(1, p)).toFixed(3)})`;
+      },
       show() {
         if (el) return;
         el = document.createElement('div');
@@ -159,6 +294,7 @@
     AT.art.hold(false);
     const pill = progressPill();
     try {
+      if (previewing) return; // (it paints for the new scale itself)
       if (!refitCovered && (going || !live() || !AT.sceneName || AT.art.ready(E.stage))) { await AT.art.fit(E.stage); return; }
       if (!refitCovered) {
         pauseForRefit();
@@ -192,11 +328,12 @@
         E.stage.classList.remove('covered');
         if (parseFloat(E.fade.style.opacity || 0) > 0) await E.cover(0, 0.3);
         refitCovered = false;
-        E.paused = false;
+        E.hold('refit', false);
         if (AT.audio.hold) AT.audio.hold(false);
       }
       mark('at:refit');
       if (done) done();
+      if (!going && AT.sceneName) AT.art.idlePrefetch(AT.sceneName);
     }
   }
 
@@ -372,6 +509,9 @@
   // ---------- boot ----------
   AT.boot = async () => {
     mark('at:boot');
+    // start reading the bitmaps stored on earlier visits (js/raster-cache.js) and the painting
+    // self-checks right away
+    AT.art.warm();
     const params = new URLSearchParams(location.search);
     const record = params.get('record');
     // ?manual=1 is the deterministic test mode (see installTestHook in engine.js)

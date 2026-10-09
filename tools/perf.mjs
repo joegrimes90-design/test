@@ -8,8 +8,10 @@
 // tablet), and reports how long it takes to reach each milestone (ms after
 // navigation start unless noted):
 //   titleShown      the title has faded in (game mark at:shown:title)
-//   titlePainted    two animation frames later, i.e. the faded-in title is on screen
-//                   (at:painted:title, marked in the page so Playwright round trips don't count)
+//   titlePainted    the faded-in title is on screen: two animation frames after titleShown
+//                   (at:painted:title, marked in the page so Playwright round trips don't count),
+//                   or the title's largest-contentful-paint (titleLcp: the frame showing its largest
+//                   image presented, i.e. rasterised) if later
 //   titleLive       the title is animating (at:live:title when the game marks it, else titlePainted)
 //   titleFrame      when the harness first saw the painted title (kept for continuity)
 //   frameP50/P95    rAF intervals on the animated title (up to --title-frames intervals or
@@ -19,6 +21,9 @@
 //                   and each scene just after it is entered), nobody tapping anything
 //   voiceAudio      when the narration audio arrived (at:voice: js/voice-data.js, loaded after
 //                   boot, has run); waited for up to 30 s after the rest is measured
+//   bitmapsPainted  sprite bitmaps painted in the whole run (bitmapsOffThread of them off the main
+//                   thread; paintedInPlay while a scene was played rather than behind its cover;
+//                   bitmapsStored taken from the bitmaps an earlier visit stored, storeLoadMs to read them)
 // --page     the page to load; --page /dist/atticus.html measures the one-file artifact
 //            bundle (rebuilt first with tools/build-artifact.mjs).
 // --net kbps,rtt  emulates a network (download kbit/s, round trip ms) and serves text
@@ -92,6 +97,11 @@ const median = (a) => { const s = a.filter((v) => v != null).sort((x, y) => x - 
 function pageInit() {
   window.__long = [];
   try { new PerformanceObserver((l) => l.getEntries().forEach((e) => window.__long.push([e.startTime, e.duration]))).observe({ type: 'longtask', buffered: true }); } catch (e) { /* unsupported */ }
+  // largest-contentful-paint: when the largest image or text painted so far reached the screen
+  // (presentation time: the frame's tiles rasterised), so titlePainted cannot count a frame whose
+  // SVG is still being rasterised
+  window.__lcp = [];
+  try { new PerformanceObserver((l) => l.getEntries().forEach((e) => window.__lcp.push(e.startTime))).observe({ type: 'largest-contentful-paint', buffered: true }); } catch (e) { /* unsupported */ }
   // at:painted:<scene> two animation frames after at:shown:<scene>: the faded-in
   // scene has then been drawn. (Wrapping performance.mark instead of a mark
   // PerformanceObserver: observer callbacks are delivered late on a busy page.)
@@ -220,6 +230,8 @@ async function measureLoad(page, cdp, opts = {}) {
   await cdp.send('Emulation.setCPUThrottlingRate', { rate: CPU });
   await page.goto(base + PAGE, { waitUntil: 'commit' });
   await page.waitForFunction(() => performance.getEntriesByName('at:painted:title').length > 0, null, { timeout: 180000, polling: 50 });
+  // (a cold first visit shows the title still while its bitmaps are painted: frames are sampled once it animates)
+  await page.waitForFunction(() => performance.getEntriesByName('at:live:title').length > 0, null, { timeout: 180000, polling: 50 }).catch(() => {});
   const r = await page.evaluate(() => {
     const m = (n) => { const e = performance.getEntriesByName(n)[0]; return e ? Math.round(e.startTime) : null; };
     const nav = performance.getEntriesByType('navigation')[0];
@@ -228,7 +240,9 @@ async function measureLoad(page, cdp, opts = {}) {
       fcp: fcp ? Math.round(fcp.startTime) : null,
       domContentLoaded: Math.round(nav.domContentLoadedEventEnd),
       boot: m('at:boot'), warm: m('at:warm'), titleBuilt: m('at:built:title'), titleShown: m('at:shown:title'),
-      titlePainted: m('at:painted:title'), titleLive: m('at:live:title') ?? m('at:painted:title'),
+      titlePainted: Math.max(m('at:painted:title'), Math.round(Math.max(0, ...window.__lcp.filter((t) => t <= performance.now())))),
+      titleLcp: window.__lcp.length ? Math.round(Math.max(...window.__lcp)) : null,
+      titleLive: m('at:live:title') ?? m('at:painted:title'),
       titleFrame: Math.round(performance.now()),
     };
   });
@@ -289,6 +303,12 @@ async function measureLoad(page, cdp, opts = {}) {
       heapMB: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null,
     };
   }));
+  // sprite bitmaps: painted (off the main thread or not), painted during play (not behind a cover),
+  // and taken from the bitmaps stored on an earlier visit
+  Object.assign(r, await page.evaluate(() => {
+    const a = AT.art.stats(), c = AT.rasterCache ? AT.rasterCache.stats() : {};
+    return { bitmapsPainted: a.jobs, bitmapsOffThread: a.asyncJobs, paintedInPlay: a.playMisses, bitmapsStored: a.stored == null ? null : a.stored, storeLoadMs: c.loadMs == null ? null : c.loadMs };
+  }));
   // when the narration audio (js/voice-data.js, loaded after boot) arrived; on a slow
   // --net it can arrive after the title, so wait a little for it
   await page.waitForFunction(() => performance.getEntriesByName('at:voice').length > 0, null, { timeout: 30000, polling: 100 }).catch(() => {});
@@ -337,9 +357,10 @@ async function oneRun() {
   return r;
 }
 
-const KEYS = ['fcp', 'domContentLoaded', 'boot', 'warm', 'titleBuilt', 'titleShown', 'titlePainted', 'titleLive', 'titleFrame',
+const KEYS = ['fcp', 'domContentLoaded', 'boot', 'warm', 'titleBuilt', 'titleShown', 'titlePainted', 'titleLcp', 'titleLive', 'titleFrame',
   'frameP50', 'frameP95', 'rasterMsPerFrame', 'longTasks', 'longTaskMs', 'maxLongTask', 'maxLongTaskIdle', 'longTaskIdleMs',
-  'maxLongTaskPlay', 'longTaskPlayMs', 'playFrameP95', 'transitionMax', 'sceneFrameP95', 'scriptSec', 'taskSec', 'heapMB', 'voiceAudio', 'errors'];
+  'maxLongTaskPlay', 'longTaskPlayMs', 'playFrameP95', 'transitionMax', 'sceneFrameP95', 'scriptSec', 'taskSec', 'heapMB', 'voiceAudio',
+  'bitmapsPainted', 'bitmapsOffThread', 'paintedInPlay', 'bitmapsStored', 'storeLoadMs', 'errors'];
 const PLAY_KEYS = ['sec', 'actions', 'gameClock', 'frameP50', 'frameP95', 'frameMax', 'maxLongTask', 'longTaskMs', 'longTasks'];
 const SCENE_KEYS = ['faded', 'dom', 'raster', 'built', 'shown', 'painted', 'frameP50', 'frameP95'];
 function summarise(runs) {

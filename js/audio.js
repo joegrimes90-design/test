@@ -303,7 +303,9 @@ AT.audio = (() => {
     g.connect(musicBus);
     const m = { name, start: ctx.currentTime + 0.1, scheduledTo: 0, gain: g };
     m.timer = setInterval(() => {
-      if (!musicOn) return;
+      // (nothing while sound is paused: the context's clock can still move a little after
+      // suspend() is called, and notes scheduled then would start on the way back)
+      if (!musicOn || pausedFor.size) return;
       const now = ctx.currentTime - m.start;
       const ahead = now + 0.35;
       if (ahead > m.scheduledTo) {

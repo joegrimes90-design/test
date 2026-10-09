@@ -46,8 +46,8 @@ export function usedSprites(sources = gameSources().filter(({ file }) => !/art-(
       const concat = /'(\w+_)'\s*\+\s*(\w+)/.exec(expr);
       if (concat) add(file, 'concat', ['potty', 'teeth', 'baby'].map((k) => concat[1] + k));
     }
-    // AT.art.img/url/box('x'), node.swap('x'), node.add('x'), puppet.hold('x'), hudButton(id, 'x')
-    for (const m of src.matchAll(/(AT\.art\.(?:img|url|box)|\.swap|(?<!classList)\.add|\.hold)\(/g)) {
+    // AT.art.img/url/box('x'), node.swap('x'), node.add('x'), puppet.hold('x') (not the clock's E.hold(reason)), hudButton(id, 'x')
+    for (const m of src.matchAll(/(AT\.art\.(?:img|url|box)|\.swap|(?<!classList)\.add|(?<!\bE)\.hold)\(/g)) {
       add(file, m[1], literals(argAt(src, m.index + m[0].length, 0) || ''));
     }
     for (const m of src.matchAll(/hudButton\(/g)) add(file, 'hudButton', literals(argAt(src, m.index + m[0].length, 1) || ''));

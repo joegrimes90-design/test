@@ -86,7 +86,8 @@ test('sound pauses while the page is hidden and comes back with it (real clock)'
   await prepare(page);
   await countSources(page);
   await page.goto('/index.html');
-  await page.waitForFunction(() => performance.getEntriesByName('at:shown:title').length > 0, null, { timeout: 60_000 });
+  // the title animating (after the cold first visit's still preview)
+  await page.waitForFunction(() => performance.getEntriesByName('at:live:title').length > 0, null, { timeout: 60_000 });
   // tapping the title switches the sound on and starts the music
   await tapStage(page, 800, 640);
   await expect.poll(() => page.evaluate(() => AT.audio.ready), { timeout: 20_000 }).toBe(true);
