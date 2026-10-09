@@ -249,6 +249,20 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   // (it is only slower). ?raster=svg, a failed boot self-check or a canvas
   // SecurityError switch everything back to plain SVG images: exactly the
   // rendering this layer replaces, kept as a kill switch.
+  //
+  // INVARIANT (checked by audit(), asserted before every visual-test screenshot):
+  //   - a displayed bitmap is never magnified: k_bitmap >= k_display / 1.01;
+  //   - a sprite at rest shows k_bitmap = k_display within 0.1%;
+  //   - when no such bitmap is ready, the img shows its SVG.
+  // Scales that change are handled by: tweenStart() (a scale tween gets the bitmap
+  // for the largest scale it reaches, else SVG; refitted exactly when it ends),
+  // particles (bitmaps for their largest scale, in 2^(1/4) buckets: they move,
+  // spin and fade), checkScales() right after Node.set changes a scale (ratchets
+  // up in 2^(1/32) steps once a bitmap would be magnified by more than 1%), and
+  // sweep() once per second of game clock (paints sprites still on SVG, catches
+  // other changes, settles a sprite on its exact scale once it has stopped
+  // changing). Resizes refit the stage (js/game.js). PNG bytes stay within a
+  // budget (evict).
   const MAX_PX = 16e6; // iOS refuses bigger canvases: such sprites stay SVG
   const params = (() => { try { return new URLSearchParams(location.search); } catch (e) { return new URLSearchParams(''); } })();
   // test-only knobs (tests/visual/raster-parity.spec.mjs proves that broken variants fail)
@@ -259,9 +273,13 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   const inflight = new Map();   // key -> Promise<entry|null>
   const queue = [];             // rasterise jobs {id, k, key, resolve}
   const svgImgs = new Map();    // id -> Promise<loaded SVG HTMLImageElement|null>
+  const svgReady = new Map();   // id -> loaded SVG HTMLImageElement (for painting synchronously)
+  const failed = new Set();     // keys that cannot be painted (too big, decode errors)
   const pendingFit = new Set(); // imgs created since the last microtask flush
   const idleWaiters = [];
-  const st = { jobs: 0, ms: 0, hits: 0, misses: 0, svgFallbacks: 0, bytes: 0 };
+  const st = { jobs: 0, ms: 0, hits: 0, misses: 0, svgFallbacks: 0, bytes: 0, evicted: 0, syncJobs: 0 };
+  const debug = params.get('debug') === '1';
+  const SYNC_MS = 40; // a bitmap estimated to cost at most this is painted on the spot when a tween needs it
   let running = false, flushQueued = false, busy = 0, useClock = 0;
   let learnMs = 0, learnPx = 0; // for cost estimates: ms per device pixel of finished jobs
   const later = typeof queueMicrotask === 'function' ? queueMicrotask : (fn) => Promise.resolve().then(fn);
@@ -280,7 +298,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   });
 
   function checkIdle() {
-    if (running || queue.length || busy || pendingFit.size || flushQueued) return;
+    if (running || queue.length || busy || pendingFit.size || flushQueued || dirtyQueued) return;
     while (idleWaiters.length) idleWaiters.shift()();
   }
   // Resolves when nothing is queued or being painted and every requested bitmap has been put in its img.
@@ -350,7 +368,8 @@ ${ink('ks', 1.6, 1.6, 0.25)}
         im.onload = () => resolve(im);
         im.onerror = () => resolve(null);
         im.src = url(id);
-      }).then((im) => (im && im.decode ? im.decode().then(() => im, () => im) : im));
+      }).then((im) => (im && im.decode ? im.decode().then(() => im, () => im) : im))
+        .then((im) => { if (im) svgReady.set(id, im); return im; });
       svgImgs.set(id, p);
     }
     return p;
@@ -414,7 +433,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     const blob = new Blob([bytes], { type: 'image/png' });
     const ms = performance.now() - t0;
-    st.jobs++; st.ms += ms; st.bytes += blob.size;
+    st.jobs++; st.ms += ms;
     learnMs += ms; learnPx += cw * ch;
     const entry = { key: keyOf(id, k), id, k, url: URL.createObjectURL(blob), blob, cw, ch, ms, bytes: blob.size, used: ++useClock };
     // keep a decoded copy referenced so swapping the src is immediate
@@ -435,6 +454,33 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   function store(entry) {
     cache.set(entry.key, entry);
     byUrl.set(entry.url, entry);
+    st.bytes += entry.bytes;
+    evict();
+  }
+  // ----- memory: PNG bytes kept within a budget -----
+  function budget() {
+    const nav = typeof navigator !== 'undefined' ? navigator : {};
+    const ua = nav.userAgent || '';
+    const small = /iP(hone|od|ad)/.test(ua) || (/Macintosh/.test(ua) && nav.maxTouchPoints > 1) || (nav.deviceMemory && nav.deviceMemory <= 4);
+    return (small ? 64 : 192) * 1048576;
+  }
+  // Least recently used bitmaps go first; a bitmap any connected <img> shows is never
+  // dropped (revoking its URL would break the image), nor is any SVG URL.
+  function evict() {
+    const limit = budget();
+    if (st.bytes <= limit || typeof document === 'undefined') return;
+    const inUse = new Set();
+    for (const im of document.images) inUse.add(im.getAttribute('src'));
+    for (const e of [...cache.values()].sort((a, b) => a.used - b.used)) {
+      if (st.bytes <= limit) break;
+      if (inUse.has(e.url)) continue;
+      cache.delete(e.key);
+      byUrl.delete(e.url);
+      st.bytes -= e.bytes;
+      st.evicted++;
+      e.pre = null;
+      URL.revokeObjectURL(e.url);
+    }
   }
   async function pump() {
     if (running) return;
@@ -446,6 +492,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
         let entry = null;
         if (mode === 'bitmap') { try { entry = await runJob(job); } catch (e) { entry = null; } }
         if (entry) store(entry);
+        else if (mode === 'bitmap') failed.add(job.key);
         inflight.delete(job.key);
         job.resolve(entry);
       }
@@ -516,6 +563,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   // Returns null (nothing to wait for) or a promise.
   function want(im, k) {
     const id = im.dataset.sprite;
+    if (tuning.oversample !== 1) k = round3(k * tuning.oversample);
     if (!sprites[id] || !(k >= 0.01) || !isFinite(k)) return null;
     const key = keyOf(id, k);
     im._atWant = key;
@@ -532,10 +580,22 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     for (let el = im.parentElement; el; el = el.parentElement) if (el._atTween > 0) return true;
     return false;
   }
+  // 2^(ceil(n*log2 k)/n): n=4 for particles (at most 19% above), n=32 for oscillations (2.2%)
+  const bucketUp = (k, n) => round3(Math.pow(2, Math.ceil(n * Math.log2(k) - 1e-6) / n));
+  // Particles (E.burst/E.floatUp: data-kmax on the node = the largest scale it reaches)
+  // get a bitmap for that scale, in coarse buckets.
+  const kmaxOf = (im) => { const par = im.parentElement; return par && par.dataset ? +par.dataset.kmax || 0 : 0; };
+  function kWanted(im, pass) {
+    const kmax = kmaxOf(im);
+    if (kmax) {
+      const host = im.parentElement.parentElement;
+      return host ? bucketUp(scaleOf(cumMatrix(host, pass)) * kmax, 4) : 0;
+    }
+    return kOf(im, pass);
+  }
   function fitOne(im, pass) {
     if (mode !== 'bitmap' || underTween(im)) return null; // tweens refit when they end
-    const k = kOf(im, pass);
-    return want(im, round3(k * tuning.oversample));
+    return want(im, kWanted(im, pass));
   }
   // Fit every sprite img under root to its current device scale. Resolves once all are bitmaps
   // (or have stayed SVG). opts.onProgress(fraction) reports painted area (cw*ch) over the total.
@@ -550,7 +610,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       pendingFit.delete(im);
       const p = fitOne(im, pass);
       if (!p) continue;
-      const b = sprites[im.dataset.sprite].box, k = kOf(im, pass);
+      const b = sprites[im.dataset.sprite].box, k = kWanted(im, pass);
       const area = b[2] * b[3] * k * k;
       total += area;
       waits.push(p.then(() => { done += area; report(); }));
@@ -589,13 +649,17 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     return im;
   }
   // ----- scale tweens (called by E.tween for a Node and s/sx/sy) -----
-  // ease: the tween's easing function, whose overshoot (back, elastic) counts too.
+  // Every img under the node gets, before the tween's first frame, a bitmap for the
+  // largest device scale it reaches (ease: the tween's easing function, whose
+  // overshoot counts): from the cache, else painted on the spot when that is
+  // cheap (<= SYNC_MS), else its SVG for the tween. A bitmap is only ever scaled
+  // down while it moves. When the tween ends, tweenEnd() refits the exact scale.
   function tweenStart(node, to, ease) {
     if (mode !== 'bitmap') return;
     node.el._atTween = (node.el._atTween || 0) + 1;
+    const imgs = [...node.el.querySelectorAll('img[data-sprite]')];
     // bitmaps still being painted for the old size are not put in
-    node.el.querySelectorAll('img[data-sprite]').forEach((im) => { im._atWant = null; });
-    const imgs = node.el.querySelectorAll('img[data-k]');
+    imgs.forEach((im) => { im._atWant = null; });
     if (!imgs.length) return;
     let vmin = 0, vmax = 1;
     for (let i = 0; i <= 64; i++) { const v = ease(i / 64); if (v < vmin) vmin = v; if (v > vmax) vmax = v; }
@@ -608,14 +672,154 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     // the largest device scale each img reaches (set, measure, restore: nothing paints in between)
     node.set(big);
     const pass = new Map();
-    const need = [...imgs].map((im) => kOf(im, pass));
+    const need = imgs.map((im) => kWanted(im, pass));
     node.set(cur);
-    // a bitmap that would be magnified shows its SVG for the tween instead
-    imgs.forEach((im, i) => { if (+im.dataset.k < need[i] / 1.01) unapply(im); });
+    imgs.forEach((im, i) => {
+      const k = round3(need[i] * tuning.oversample);
+      if (!(k >= 0.01)) return;
+      const kb = +im.dataset.k || 0;
+      if (kb >= k / 1.01 && kb <= k * 1.19) return; // what it shows will do
+      const id = im.dataset.sprite;
+      const key = keyOf(id, k);
+      let e = cache.get(key);
+      if (!e && !failed.has(key) && svgReady.has(id) && estimate(id, k) <= SYNC_MS) {
+        e = bake(id, k, svgReady.get(id));
+        if (e) { st.syncJobs++; store(e); }
+      }
+      if (e && e.pre && e.pre.complete) { st.hits++; im._atWant = key; apply(im, e); return; }
+      if (kb) unapply(im); // SVG for the tween (or until the new bitmap has decoded)
+      if (e) {
+        im._atWant = key;
+        busy++;
+        e.pre.decode().catch(() => {}).then(() => { if (im._atWant === key && cache.has(key)) apply(im, e); })
+          .finally(() => { busy--; checkIdle(); });
+      }
+    });
   }
   function tweenEnd(node) {
     if (node.el._atTween > 0) node.el._atTween--;
     if (mode === 'bitmap' && node.el.isConnected) fit(node.el);
+  }
+
+  // ----- scales that change outside tweens -----
+  // Node.set reports nodes whose s/sx/sy changed (pulsing buttons, breathing
+  // puppets, squashing bugs, glows). Right after the code that changed them, their
+  // sprites are checked: shown magnified by more than 1% -> ratchet up to the next
+  // 2^(1/32) step above (at most 2.2% more than needed, so an oscillation soon has a
+  // bitmap for its peak). The current bitmap stays until the new one is ready.
+  const dirty = new Set();
+  let dirtyQueued = false;
+  const now = () => (AT.engine && AT.engine.time) || 0;
+  function scaleChanged(node) {
+    if (mode !== 'bitmap') return;
+    dirty.add(node.el);
+    if (!dirtyQueued) { dirtyQueued = true; later(checkScales); }
+  }
+  function checkScales() {
+    dirtyQueued = false;
+    const t = now();
+    const pass = new Map();
+    for (const el of dirty) {
+      if (!el.isConnected) continue;
+      for (const im of el.querySelectorAll('img[data-sprite]')) {
+        im._atMoved = t;
+        const kb = +im.dataset.k || 0;
+        if (!kb || kmaxOf(im) || underTween(im)) continue; // SVG is exact; particles and tweens are handled apart
+        const kd = kOf(im, pass);
+        if (kd > kb * 1.01) ratchet(im, kd);
+      }
+    }
+    dirty.clear();
+    checkIdle();
+  }
+  function ratchet(im, kd) {
+    const kk = bucketUp(kd, 32);
+    const key = keyOf(im.dataset.sprite, kk);
+    if (im._atWant === key && inflight.has(key)) return;
+    want(im, kk);
+  }
+
+  // ----- sweep: once per second of game clock (engine tick) -----
+  // Everything on the stage: no bitmap yet -> paint one; magnified (by anything,
+  // e.g. CSS animations) -> ratchet; at rest -> settle on the exact scale. At rest
+  // means the scale has not changed for a second of game clock: no Node.set scale
+  // change in its chain (checkScales) and the same k as at the previous sweep.
+  const near = (a, b) => Math.abs(a / b - 1) <= 0.001;
+  const REST = 1; // seconds of game clock
+  function sweep(root) {
+    if (mode !== 'bitmap' || !root || !root.querySelectorAll) return;
+    const pass = new Map();
+    const t = now();
+    for (const im of root.querySelectorAll('img[data-sprite]')) {
+      if (kmaxOf(im) || underTween(im) || !im.isConnected) continue; // particles and tweens are handled elsewhere
+      const kd = kOf(im, pass);
+      const prev = im._atK;
+      im._atK = kd;
+      if (!(kd >= 0.01)) continue;
+      const kb = +im.dataset.k || 0;
+      const pending = im._atWant && inflight.has(im._atWant);
+      if (!kb) {
+        if (!pending && !failed.has(keyOf(im.dataset.sprite, kd))) want(im, kd);
+      } else if (kd > kb * 1.01) {
+        ratchet(im, kd);
+      } else if (!near(kb, kd) && prev && near(prev, kd) && !(t - (im._atMoved ?? -Infinity) < REST)) {
+        if (!(pending && im._atWant === keyOf(im.dataset.sprite, kd))) want(im, kd);
+      }
+    }
+    if (debug) {
+      const bad = audit(root);
+      if (bad.length) console.warn('[AT.art] sprite bitmaps off scale:', JSON.stringify(bad));
+    }
+  }
+
+  // ----- audit: visible sprites that break the invariant -----
+  // Visible: no display:none or opacity 0 on the way to the root, not under a
+  // running scale tween, and on screen. Returns [{id, kDisplay, kBitmap}].
+  function shownNow(im) {
+    for (let el = im; el && el !== document.body; el = el.parentElement) {
+      const s = el.style;
+      if (s.display === 'none' || s.visibility === 'hidden' || (s.opacity !== '' && +s.opacity === 0) || el._atTween > 0) return false;
+    }
+    return true;
+  }
+  function audit(root) {
+    root = root || (AT.engine && AT.engine.stage);
+    if (mode !== 'bitmap' || !root || !root.querySelectorAll) return [];
+    const out = [];
+    const pass = new Map();
+    const vw = window.innerWidth * dpr(), vh = window.innerHeight * dpr();
+    for (const im of root.querySelectorAll('img[data-k]')) {
+      if (!shownNow(im)) continue;
+      const M = deviceMatrix(im, pass);
+      if (!M) continue;
+      const b = sprites[im.dataset.sprite].box;
+      const pts = [[0, 0], [b[2], 0], [0, b[3]], [b[2], b[3]]].map(([x, y]) => M.transformPoint(new DOMPoint(x, y)));
+      if (Math.max(...pts.map((p) => p.x)) <= 0 || Math.min(...pts.map((p) => p.x)) >= vw || Math.max(...pts.map((p) => p.y)) <= 0 || Math.min(...pts.map((p) => p.y)) >= vh) continue;
+      const kd = round3(scaleOf(M)), kb = +im.dataset.k;
+      if (!(kd >= 0.01)) continue;
+      // at rest for two seconds (so a sweep has seen it at rest for one): must be exact.
+      // Moving (particles; scale changed lately or since the last sweep): only never magnified.
+      const moving = kmaxOf(im) || now() - (im._atMoved ?? -Infinity) < 2 * REST + 1e-6 || (im._atK && !near(im._atK, kd));
+      if (kb < kd / 1.01 || (!moving && !near(kb, kd))) out.push({ id: im.dataset.sprite, kDisplay: kd, kBitmap: kb });
+    }
+    return out;
+  }
+  // Are bitmaps for the current scale of every sprite under root already painted?
+  function ready(root) {
+    if (mode !== 'bitmap' || !root) return true;
+    const pass = new Map();
+    for (const im of root.querySelectorAll('img[data-sprite]')) {
+      if (underTween(im)) continue;
+      const k = round3(kWanted(im, pass));
+      const key = keyOf(im.dataset.sprite, k);
+      if (k >= 0.01 && !cache.has(key) && !failed.has(key)) return false;
+    }
+    return true;
+  }
+  // idle() also waits for p (e.g. a pending resize refit)
+  function track(p) {
+    busy++;
+    Promise.resolve(p).catch(() => {}).then(() => { busy--; checkIdle(); });
   }
 
   // the sprite an img currently displays (from its src: SVG or bitmap), or null
@@ -626,12 +830,13 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     const id = im.dataset.sprite;
     return sprites[id] && sprites[id].url === src ? id : null;
   }
-  const stats = () => ({ ...st, ms: Math.round(st.ms), cached: cache.size, mode });
+  const stats = () => ({ ...st, ms: Math.round(st.ms), cached: cache.size, budget: budget(), mode });
 
   return {
     define, img, url, svgOf, box, has, list,
     get mode() { return mode; },
     fit, idle, stats, setSprite, shows, kOf, deviceMatrix, rasterize, estimate, tweenStart, tweenEnd,
+    sweep, audit, ready, track, scaleChanged,
     C, E, R, smooth, blob, fluff, puffs, star, heart, line, rng, group,
     mix, inkOf, shade, tint, SEPIA,
   };

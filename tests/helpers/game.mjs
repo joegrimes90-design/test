@@ -234,13 +234,18 @@ export async function autoPlay(page, until, { maxClock = 900, idleClock = 60, fp
   throw new Error(`auto-player gave up after ${maxActions} actions`);
 }
 
-/** Wait for sprite bitmaps, fonts and every image to be decoded, with the stage shown. */
+/**
+ * Wait for sprite bitmaps, fonts and every image to be decoded, with the stage shown.
+ * Returns AT.art.audit(): the visible sprites whose bitmap is magnified, or (at rest)
+ * not at the displayed scale. Screenshots expect [].
+ */
 export async function settleForScreenshot(page) {
   await reveal(page);
-  await page.evaluate(async () => {
+  return page.evaluate(async () => {
     if (window.AT && AT.art && AT.art.idle) await AT.art.idle();
     await document.fonts.ready;
     await Promise.all([...document.querySelectorAll('img')].map((im) => im.decode().catch(() => {})));
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    return window.AT && AT.art && AT.art.audit ? AT.art.audit() : [];
   });
 }

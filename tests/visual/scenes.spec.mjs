@@ -1,6 +1,6 @@
 // Deterministic frames of every scene at deviceScaleFactor 2: manual clock,
 // seeded Math.random, no audio. Each frame is compared with its baseline.
-import { test } from '../helpers/fixtures.mjs';
+import { test, expect } from '../helpers/fixtures.mjs';
 import { prepare, openGame, step, stepUntil, autoPlay, settleForScreenshot } from '../helpers/game.mjs';
 import { expectMatchesBaseline } from '../helpers/visual.mjs';
 
@@ -20,7 +20,8 @@ const FRAMES = [
 ];
 
 async function shoot(page, testInfo, name) {
-  await settleForScreenshot(page);
+  // no visible sprite bitmap is magnified, or off its displayed scale at rest (js/art-core.js)
+  expect(await settleForScreenshot(page), 'sprite bitmaps off scale (AT.art.audit)').toEqual([]);
   const png = await page.screenshot({ animations: 'disabled', caret: 'hide' });
   await expectMatchesBaseline(testInfo, name, png);
 }

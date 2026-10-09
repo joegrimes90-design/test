@@ -37,6 +37,7 @@ for (const p of pages) {
     }));
     expect(bm.mode).toBe(RASTER || 'bitmap');
     if (bm.mode === 'bitmap') expect(bm.notBitmap, 'sprites still shown as SVG').toEqual([]);
+    expect(await page.evaluate(() => AT.art.audit(document.getElementById('page'))), 'sprite bitmaps off scale (AT.art.audit)').toEqual([]);
     const png = await page.screenshot({ clip: { x: 0, y: 0, width: p.width, height: p.height }, animations: 'disabled' });
     const regions = p.cells.map((c) => ({ name: c.s === 1 ? c.id : `${c.id}@${c.s}`, x: c.x * dpr, y: c.y * dpr, w: c.w * dpr, h: c.h * dpr }));
     // The half-scale backgrounds (stage-*) are shown at a density the game never

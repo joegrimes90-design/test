@@ -54,6 +54,7 @@ AT.engine = (() => {
   // fire-and-forget a script that belongs to the current scene
   E.spawn = (fn) => E.guard(Promise.resolve().then(fn));
 
+  let lastSweep = -1;
   function tick(dt) {
     E.time += dt;
     // iterate over a copy: callbacks may add or remove updaters
@@ -65,12 +66,18 @@ AT.engine = (() => {
     for (let i = timers.length - 1; i >= 0; i--) {
       if (timers[i].t <= E.time + 1e-9) { const tm = timers[i]; timers.splice(i, 1); tm.resolve(); }
     }
+    // once per second of game clock, sprite bitmaps catch up with scales that changed
+    // (on this clock, so ?manual test runs stay deterministic)
+    const sec = Math.floor(E.time);
+    if (sec !== lastSweep) { lastSweep = sec; if (AT.art && AT.art.sweep) AT.art.sweep(E.stage); }
   }
   E.dueTimers = () => timers.some((tm) => tm.t <= E.time + 1e-9);
 
   let last = 0;
   function frame(now) {
     if (!E.recording && !E.manual) requestAnimationFrame(frame);
+    // paused (sprites being repainted behind a cover after a resize): the clock stands still
+    if (E.paused) { last = now; return; }
     const dt = last ? Math.min(0.05, (now - last) / 1000) : 1 / 60;
     last = now;
     tick(dt * E.speed);
@@ -138,12 +145,17 @@ AT.engine = (() => {
       this.el.className = 'node' + (opts.cls ? ' ' + opts.cls : '');
       this.x = 0; this.y = 0; this.rot = 0; this.sx = 1; this.sy = 1; this.alpha = 1; this.s = 1;
       this.visible = true;
+      // particles: the largest scale this node will reach (its sprite bitmap is painted for that)
+      if (opts.kMax) this.el.dataset.kmax = opts.kMax;
       if (opts.sprite) this.img = this.add(opts.sprite);
       if (parent) (parent.el || parent).appendChild(this.el);
       this.set(opts);
     }
     set(p) {
+      const s0 = this.s, sx0 = this.sx, sy0 = this.sy;
       for (const k in p) if (k in this && k !== 'el') this[k] = p[k];
+      // its sprites may need bitmaps for the new scale (AT.art)
+      if ((this.s !== s0 || this.sx !== sx0 || this.sy !== sy0) && AT.art && AT.art.scaleChanged) AT.art.scaleChanged(this);
       const sx = this.sx * this.s, sy = this.sy * this.s;
       this.el.style.transform = `translate(${this.x.toFixed(2)}px,${this.y.toFixed(2)}px) rotate(${this.rot.toFixed(2)}deg) scale(${sx.toFixed(4)},${sy.toFixed(4)})`;
       this.el.style.opacity = this.alpha;
@@ -225,7 +237,32 @@ AT.engine = (() => {
       E.ox = ox; E.oy = oy;
       E.stage.style.transform = `translate(${ox}px,${oy}px) scale(${E.scale})`;
     };
-    window.addEventListener('resize', () => { fit(); if (AT.art && AT.art.fit) AT.art.fit(E.stage); });
+    // resizes, rotation, fullscreen and zoom (devicePixelRatio) changes: refit the stage,
+    // then E.onResized (js/game.js repaints the sprite bitmaps for the new scale)
+    let lastDpr = window.devicePixelRatio || 1;
+    const resized = () => {
+      fit();
+      if (E.onResized) E.onResized();
+    };
+    const watchDpr = () => {
+      if (!window.matchMedia) return;
+      try {
+        const mq = window.matchMedia(`(resolution: ${lastDpr}dppx)`);
+        const on = () => {
+          if (mq.removeEventListener) mq.removeEventListener('change', on); else mq.removeListener(on);
+          lastDpr = window.devicePixelRatio || 1;
+          watchDpr();
+          resized();
+        };
+        if (mq.addEventListener) mq.addEventListener('change', on); else mq.addListener(on);
+      } catch (e) { /* no media queries: the resize event below still compares devicePixelRatio */ }
+    };
+    window.addEventListener('resize', () => {
+      const d = window.devicePixelRatio || 1;
+      if (d !== lastDpr) { lastDpr = d; watchDpr(); }
+      resized();
+    });
+    watchDpr();
     fit();
     E.camera.set({ x: 0, y: 0, zoom: 1 });
     if (E.manual) installTestHook();
@@ -402,8 +439,8 @@ AT.engine = (() => {
     for (let i = 0; i < n; i++) {
       const a = o.angle != null ? o.angle + (Math.random() - 0.5) * (o.spread || 1) : Math.random() * Math.PI * 2;
       const sp = (o.speed || 400) * (0.5 + Math.random() * 0.7);
-      const nd = new Node(layer, { sprite: list[i % list.length], cls: 'fx' });
       const sc = (o.scale || 1) * (0.6 + Math.random() * 0.6);
+      const nd = new Node(layer, { sprite: list[i % list.length], cls: 'fx', kMax: sc });
       parts.push({ nd, x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - (o.up || 0), r: Math.random() * 360, vr: (Math.random() - 0.5) * (o.spin || 400), sc, life: (o.life || 1.2) * (0.7 + Math.random() * 0.6), age: 0 });
     }
     const g = o.gravity == null ? 600 : o.gravity;
@@ -425,7 +462,7 @@ AT.engine = (() => {
   };
   // a few floating things that drift upwards (hearts, notes, bubbles)
   E.floatUp = (layer, sprite, x, y, o = {}) => {
-    const nd = new Node(layer, { sprite, cls: 'fx' });
+    const nd = new Node(layer, { sprite, cls: 'fx', kMax: o.scale || 1 });
     const life = o.life || 2;
     const t0 = E.time;
     const sway = (Math.random() - 0.5) * 2;
@@ -439,6 +476,18 @@ AT.engine = (() => {
   };
 
   // ---------- screen transitions ----------
+  // E.cover: the same paper fade on the wall clock, for when the game clock is paused
+  E.cover = (opacity, dur = 0.25) => new Promise((resolve) => {
+    const from = parseFloat(E.fade.style.opacity || getComputedStyle(E.fade).opacity || 0);
+    E.fade.style.pointerEvents = opacity > 0 ? 'auto' : 'none';
+    const t0 = performance.now();
+    const f = (now) => {
+      const p = Math.min(1, (now - t0) / (dur * 1000));
+      E.fade.style.opacity = (from + (opacity - from) * ease.inOut(p)).toFixed(3);
+      if (p < 1) requestAnimationFrame(f); else resolve();
+    };
+    requestAnimationFrame(f);
+  });
   E.fadeTo = (opacity, dur = 0.45) => {
     const st = { v: parseFloat(E.fade.style.opacity || 0) };
     E.fade.style.pointerEvents = opacity > 0 ? 'auto' : 'none';

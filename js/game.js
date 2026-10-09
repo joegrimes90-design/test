@@ -90,6 +90,42 @@
     E.spawn(() => sc.run(ctx, params));
   };
 
+  // ---------- resizes: sprite bitmaps follow the new device scale ----------
+  // (E.onResized is called by the engine on resize, rotation, fullscreen and zoom.)
+  // After 250 ms without further changes: when bitmaps for the new scale are all
+  // cached, swap them at once; otherwise pause the clock behind the paper cover,
+  // paint them, and uncover. Bitmaps for the old scale stay cached.
+  let refitTimer = 0, refitDone = null, refits = Promise.resolve();
+  E.onResized = () => {
+    if (AT.art.mode !== 'bitmap') return;
+    if (!refitDone) AT.art.track(new Promise((r) => { refitDone = r; }));
+    clearTimeout(refitTimer);
+    refitTimer = setTimeout(() => { refits = refits.then(refitStage); }, 250);
+  };
+  async function refitStage() {
+    const done = refitDone;
+    refitDone = null;
+    let covered = false;
+    try {
+      if (going || E.manual || E.recording || !AT.sceneName || AT.art.ready(E.stage)) { await AT.art.fit(E.stage); return; }
+      covered = true;
+      mark('at:refit:cover');
+      E.paused = true;
+      await E.cover(1, 0.2);
+      E.stage.classList.add('covered');
+      await AT.art.fit(E.stage);
+      await AT.imagesReady(E.stage, 10000);
+    } finally {
+      if (covered) {
+        E.stage.classList.remove('covered');
+        await E.cover(0, 0.3);
+        E.paused = false;
+      }
+      mark('at:refit');
+      if (done) done();
+    }
+  }
+
   AT.imagesReady = (root, timeout = 3000) => {
     const imgs = [...root.querySelectorAll('img')];
     const all = Promise.all(imgs.map((im) => (im.decode ? im.decode().catch(() => {}) : Promise.resolve())));

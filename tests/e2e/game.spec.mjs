@@ -33,6 +33,28 @@ test('boots to the animated title screen with no errors (real clock)', async ({ 
   await expect.poll(() => page.evaluate(() => AT.engine.time), { timeout: 20_000 }).toBeGreaterThan(t0 + 0.05);
 });
 
+test('resizing repaints the sprites for the new size behind a short cover (real clock)', async ({ page }) => {
+  await prepare(page);
+  await page.goto('/index.html');
+  await page.waitForFunction(() => performance.getEntriesByName('at:shown:title').length > 0, null, { timeout: 60_000 });
+  const bg = () => page.evaluate(() => { const im = document.querySelector('#world img[data-sprite="bg_garden"]'); return { k: +im.dataset.k, kd: AT.art.kOf(im) }; });
+  const before = await bg();
+  expect(before.k).toBe(before.kd);
+  await page.setViewportSize({ width: 1200, height: 675 });
+  await page.waitForFunction(() => performance.getEntriesByName('at:refit').length > 0, null, { timeout: 60_000 });
+  const after = await page.evaluate(() => ({
+    covered: performance.getEntriesByName('at:refit:cover').length, paused: AT.engine.paused,
+    fade: getComputedStyle(AT.engine.fade).opacity, hidden: AT.engine.stage.classList.contains('covered'),
+  }));
+  expect(after).toEqual({ covered: 1, paused: false, fade: '0', hidden: false });
+  const now = await bg();
+  expect(now.kd).toBeCloseTo(before.kd * 1.5, 2);
+  expect(now.k, 'background bitmap at the new scale').toBe(now.kd);
+  // and the clock runs again
+  const t0 = await page.evaluate(() => AT.engine.time);
+  await expect.poll(() => page.evaluate(() => AT.engine.time), { timeout: 20_000 }).toBeGreaterThan(t0 + 0.05);
+});
+
 test('tapping the title starts the game and reaches the hub', async ({ page }) => {
   await prepare(page);
   await openGame(page);
