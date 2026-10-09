@@ -340,6 +340,9 @@ async function oneRun() {
       const { cdp, errors } = await setupPage(ctx, page);
       const cold = await measureLoad(page, cdp);
       cold.errors = errors.length;
+      // the bitmaps painted so far are stored when the browser is idle after each scene; make sure
+      // the last ones are written before reloading (a page being unloaded may lose its last write)
+      await page.evaluate(() => (window.AT && AT.rasterCache ? AT.rasterCache.flush() : null));
       const revisit = await measureLoad(page, cdp);
       revisit.errors = errors.length - cold.errors;
       await ctx.close();
