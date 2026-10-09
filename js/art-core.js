@@ -763,7 +763,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
         return runJob(job);
       })
       .then((e) => {
-        if (e && mode === 'bitmap') store(e);
+        if (e && mode === 'bitmap') { store(e); idleDone(job); }
         else if (!e && !failed.has(job.key)) st.dropped++;
         jobs.delete(job.key);
         job.resolve(e && mode === 'bitmap' ? e : null);
@@ -961,7 +961,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     entry = entry || cache.get(job.key) || null;
     if (!entry && mode === 'bitmap') {
       try { entry = await runJob(job); } catch (e) { entry = null; }
-      if (entry) store(entry);
+      if (entry) { store(entry); idleDone(job); }
       else if (!failed.has(job.key)) st.dropped++;
     }
     jobs.delete(job.key);
@@ -1314,7 +1314,6 @@ ${ink('ks', 1.6, 1.6, 0.25)}
         // (off the main thread only its loading and encoding are on it)
         if (!off && deadline && estimate(id, k) > deadline.timeRemaining() && !deadline.didTimeout) break;
         list.shift();
-        st.idleJobs++;
         rasterize(id, k, { tag }).then(() => { if (tag.alive) whenIdle(step); });
         return;
       }
@@ -1322,6 +1321,8 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     };
     whenIdle(step);
   }
+  // stats().idleJobs: bitmaps painted that only idle-time prefetch asked for (counted when painted)
+  const idleDone = (job) => { if (job.by.length && job.by.every((r) => r.tag && r.tag.pri === PRI.idle)) st.idleJobs++; };
   // Is a scene being played (not loading behind a cover)? Bitmaps painted then are counted (stats().playMisses).
   let playing = false;
   const play = (on) => { playing = !!on; };
