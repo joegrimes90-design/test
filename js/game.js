@@ -49,9 +49,12 @@
   // ---------- scene manager ----------
   let going = false;
   AT.sceneName = null;
+  const mark = (n) => { try { performance.mark(n); } catch (e) { /* old browsers */ } };
+  AT.mark = mark;
   AT.go = async (name, params = {}) => {
     if (going) return;
     going = true;
+    mark(`at:go:${name}`);
     if (AT.sceneName) await E.fadeTo(1, 0.35);
     E.newToken();
     AT.audio.stopVoice();
@@ -68,7 +71,9 @@
     document.body.dataset.scene = name;
     const ctx = sc.build(params) || {};
     await AT.imagesReady(E.stage, 2500);
+    mark(`at:built:${name}`);
     await E.fadeTo(0, 0.45);
+    mark(`at:shown:${name}`);
     going = false;
     E.spawn(() => sc.run(ctx, params));
   };
@@ -233,6 +238,7 @@
 
   // ---------- boot ----------
   AT.boot = async () => {
+    mark('at:boot');
     const params = new URLSearchParams(location.search);
     const record = params.get('record');
     E.init({ record: !!record });
@@ -260,6 +266,7 @@
       new Promise((r) => setTimeout(r, 6000)),
     ]);
     warm.innerHTML = '';
+    mark('at:warm');
     document.getElementById('loading').remove();
     AT.go(startScene && AT.scenes[startScene] ? startScene : 'title');
   };
