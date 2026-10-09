@@ -33,7 +33,8 @@ function fakeElement() {
 /**
  * @param {object} [opts]
  * @param {string[]} [opts.only] load only scripts whose path matches one of these substrings
- * @param {boolean} [opts.voice] include js/voice-data.js (2.2 MB, default false)
+ * @param {boolean} [opts.voice] include the narration audio, js/voice-data.js (1.7 MB, default false;
+ *   the small js/voice-index.js with every line's text and duration is always loaded)
  * @param {object} [opts.globals] extra globals for the context (e.g. a fake OfflineAudioContext)
  */
 export function loadGame(opts = {}) {
@@ -75,7 +76,26 @@ export function loadGame(opts = {}) {
   return ctx;
 }
 
-// All game source files (not the generated voice data), as {file, src}.
+// All game source files (not the generated js/voice-*.js narration files), as {file, src}.
 export function gameSources() {
-  return scriptList().filter((f) => !f.includes('voice-data')).map((file) => ({ file, src: read(file) }));
+  return scriptList().filter((f) => !f.startsWith('js/voice-')).map((file) => ({ file, src: read(file) }));
+}
+
+export const VOICE_FILES = ['js/voice-index.js', 'js/voice-data.js', 'js/voice-cartoons.js'];
+/**
+ * The narration files on their own (index, game audio, cartoon audio), run with a
+ * stand-in AT.addVoiceAudio. `readFile(path)` returns a file's text or null (default:
+ * the working tree), so the same loader reads older versions from git.
+ * Returns {index: AT_VOICE, scenes: AT_VOICE_SCENES, audio: {game: {id: base64}, cartoons: {...}}}.
+ */
+export function loadVoice(readFile = (p) => (fs.existsSync(path.join(ROOT, p)) ? read(p) : null)) {
+  const window = {};
+  const audio = {};
+  const AT = { addVoiceAudio: (map, part = 'game') => { audio[part] = Object.assign(audio[part] || {}, map); } };
+  const ctx = vm.createContext({ window, AT });
+  for (const f of VOICE_FILES) {
+    const src = readFile(f);
+    if (src != null) vm.runInContext(src, ctx, { filename: f });
+  }
+  return { index: window.AT_VOICE || {}, scenes: window.AT_VOICE_SCENES || null, audio };
 }

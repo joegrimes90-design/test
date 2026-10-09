@@ -7,7 +7,6 @@ AT.audio = (() => {
   let musicOn = true;
   const rec = { on: false, events: [] };
   const noiseCache = new WeakMap();
-  const voiceBufs = {};
   const midi = (m) => 440 * Math.pow(2, (m - 69) / 12);
 
   try { muted = localStorage.getItem('atticus-muted') === '1'; } catch (e) { /* storage blocked */ }
@@ -30,30 +29,35 @@ AT.audio = (() => {
     ({ master, musicBus, sfxBus, voiceBus, duck } = build(ctx));
     master.gain.value = muted ? 0 : 1;
   }
-  // While the game clock is paused (sprites being repainted after a resize), sound pauses
-  // too, so narration does not run ahead of the still scene.
-  let held = false, heldRunning = false;
-  function hold(on) {
-    on = !!on;
-    if (on === held) return;
-    held = on;
+  // Sound pauses for two reasons, which can overlap: 'refit', while the game clock is
+  // paused (sprites being repainted after a resize: hold()), so narration does not run
+  // ahead of the still scene; and 'hidden', while the page is hidden (see 'page hidden'
+  // below). The context is suspended when the first reason starts, if it was running, and
+  // resumed only when the last one ends (so coming back to the page mid-repaint stays quiet).
+  const pausedFor = new Set();
+  let resumeAfter = false;
+  function pauseSound(why, on) {
+    if (on === pausedFor.has(why)) return;
+    const was = pausedFor.size > 0;
+    if (on) pausedFor.add(why); else pausedFor.delete(why);
     if (!ctx || rec.on) return;
     const quiet = (p) => { if (p && p.catch) p.catch(() => {}); };
     try {
-      if (on) { heldRunning = ctx.state === 'running'; if (heldRunning) quiet(ctx.suspend()); }
-      else if (heldRunning) { heldRunning = false; quiet(ctx.resume()); }
+      if (on && !was) { resumeAfter = ctx.state === 'running'; if (resumeAfter && ctx.suspend) quiet(ctx.suspend()); }
+      else if (!on && !pausedFor.size && resumeAfter) { resumeAfter = false; quiet(ctx.resume()); }
     } catch (e) { /* old Web Audio */ }
   }
+  function hold(on) { pauseSound('refit', !!on); }
   function unlock() {
     init();
     if (!ctx) return;
     try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { /* optional */ }
-    if (held) heldRunning = true; // resumed when the pause ends
+    if (pausedFor.size) resumeAfter = true; // resumed when the pause ends
     else if (ctx.state !== 'running') ctx.resume();
     const b = ctx.createBuffer(1, 1, 22050);
     const s = ctx.createBufferSource();
     s.buffer = b; s.connect(ctx.destination); s.start(0);
-    preloadVoices();
+    if (prefetched !== voiceScene) prefetchScene();
   }
 
   // ---------- building blocks ----------
@@ -331,6 +335,47 @@ AT.audio = (() => {
   }
 
   // ---------- voice ----------
+  // Narration comes in two parts. js/voice-index.js (loaded with the game) has the
+  // text, speaker and duration of every line, so captions and timing never wait.
+  // The MP3 audio arrives after the game has booted: js/voice-data.js calls
+  // AT.addVoiceAudio() (and js/voice-cartoons.js adds the cartoon-only lines in
+  // ?record mode). Each scene's lines are decoded ahead of time, one by one, and
+  // only VOICE_KEEP bytes of decoded audio are kept.
+  const VOICE_KEEP = 8e6;    // decoded narration kept (about 40 s at 48 kHz)
+  const VOICE_AHEAD = 5e6;   // decoded ahead when a scene starts
+  const VOICE_WAIT = 1.5;    // seconds a line asked for before its audio has loaded may wait
+  const voiceBufs = new Map(); // id -> AudioBuffer, least recently used first
+  const decoding = new Map();  // id -> Promise<AudioBuffer|null>
+  const vstats = { voiceBytes: 0, peakVoiceBytes: 0, decodes: 0, played: 0, waited: 0, dropped: 0, fallbacks: 0 };
+  let voiceLoaded = false, voiceMissing = false, voiceLoadedResolve, voiceSettle;
+  let voiceScene = null, sceneIds = new Set(), prefetched = null, prefetchGen = 0;
+  let voiceSeq = 0; // bumped by stopVoice(), so lines still loading or decoding don't play late
+  AT.voiceReady = new Promise((r) => { voiceLoadedResolve = r; });
+  // settles once the audio has arrived, or the page has finished loading without it
+  const voiceSettled = new Promise((r) => { voiceSettle = r; });
+  window.addEventListener('load', () => { if (!voiceLoaded) { voiceMissing = true; voiceSettle(); } });
+  AT.addVoiceAudio = (map, part) => {
+    const V = window.AT_VOICE = window.AT_VOICE || {};
+    for (const id in map) (V[id] = V[id] || { s: 'N', t: '', d: 1.5 }).a = map[id];
+    if (part === 'cartoons' || voiceLoaded) return;
+    voiceLoaded = true;
+    try { performance.mark('at:voice'); } catch (e) { /* old browsers */ }
+    voiceLoadedResolve();
+    voiceSettle();
+    prefetchScene();
+  };
+  // ?record mode: the cartoons also say lines that normal play never does.
+  function loadCartoonVoices() {
+    const loaded = new Promise((resolve) => {
+      const s = document.createElement('script');
+      s.src = 'js/voice-cartoons.js';
+      s.onload = resolve;
+      s.onerror = () => { console.error('could not load js/voice-cartoons.js'); resolve(); };
+      document.body.appendChild(s);
+    });
+    return Promise.all([loaded, AT.voiceReady]);
+  }
+
   const b64ToBuf = (b64) => {
     const bin = atob(b64);
     const u = new Uint8Array(bin.length);
@@ -339,7 +384,7 @@ AT.audio = (() => {
   };
   function decodeVoice(c, id) {
     const V = window.AT_VOICE && window.AT_VOICE[id];
-    if (!V) return Promise.resolve(null);
+    if (!V || !V.a) return Promise.resolve(null);
     return new Promise((res) => {
       try {
         const p = c.decodeAudioData(b64ToBuf(V.a), res, () => res(null));
@@ -347,18 +392,69 @@ AT.audio = (() => {
       } catch (e) { res(null); }
     });
   }
-  let preloading = false;
-  async function preloadVoices() {
-    if (preloading || !window.AT_VOICE || !ctx) return;
-    preloading = true;
-    for (const id of Object.keys(window.AT_VOICE)) {
-      if (!voiceBufs[id]) voiceBufs[id] = await decodeVoice(ctx, id);
+  const sizeOf = (b) => b.length * b.numberOfChannels * 4;
+  // A line's decoded audio if it is kept (and mark it as recently used).
+  function cachedVoice(id) {
+    const b = voiceBufs.get(id);
+    if (b) { voiceBufs.delete(id); voiceBufs.set(id, b); }
+    return b;
+  }
+  // A line's decoded audio, decoding it (once) if needed.
+  function voiceBuf(id) {
+    const b = cachedVoice(id);
+    if (b) return Promise.resolve(b);
+    if (decoding.has(id)) return decoding.get(id);
+    const c = ctx;
+    vstats.decodes++;
+    const p = decodeVoice(c, id).then((buf) => {
+      decoding.delete(id);
+      if (buf && c === ctx) keepVoice(id, buf);
+      return buf;
+    });
+    decoding.set(id, p);
+    return p;
+  }
+  function keepVoice(id, buf) {
+    if (voiceBufs.has(id)) vstats.voiceBytes -= sizeOf(voiceBufs.get(id));
+    voiceBufs.set(id, buf);
+    vstats.voiceBytes += sizeOf(buf);
+    vstats.peakVoiceBytes = Math.max(vstats.peakVoiceBytes, vstats.voiceBytes);
+    // over budget: forget the least recently used lines, other scenes' lines first
+    for (const otherScenes of [true, false]) {
+      for (const [k, b] of voiceBufs) {
+        if (vstats.voiceBytes <= VOICE_KEEP) return;
+        if (k === id || (otherScenes && sceneIds.has(k))) continue;
+        voiceBufs.delete(k);
+        vstats.voiceBytes -= sizeOf(b);
+      }
     }
   }
+  // AT.go(name) calls this: decode the first lines the scene says in the background.
+  function prefetch(name) {
+    voiceScene = name;
+    sceneIds = new Set((window.AT_VOICE_SCENES && window.AT_VOICE_SCENES[name]) || []);
+    prefetchScene();
+  }
+  async function prefetchScene() {
+    if (!ctx || !voiceLoaded || !voiceScene) return;
+    const gen = ++prefetchGen;
+    prefetched = voiceScene;
+    let ahead = 0;
+    for (const id of sceneIds) {
+      const V = window.AT_VOICE[id];
+      if (!V || !V.a) continue;
+      ahead += V.d * ctx.sampleRate * 4;
+      if (ahead > VOICE_AHEAD) break;
+      await voiceBuf(id);
+      if (gen !== prefetchGen) return;
+    }
+  }
+
   let duckUntil = 0;
   const activeVoices = new Set();
   function stopVoice() {
     if (rec.on) return;
+    voiceSeq++;
     activeVoices.forEach((s) => { try { s.stop(); } catch (e) { /* already stopped */ } });
     activeVoices.clear();
     try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (e) { /* no speech */ }
@@ -384,6 +480,24 @@ AT.audio = (() => {
     if (rec.on) { rec.events.push({ t: AT.engine.time, type: 'voice', id }); return dur; }
     if (!V) { speakFallback(id); return dur; }
     if (!ctx || ctx.state !== 'running') return dur;
+    if (V.a) playVoice(id);
+    else if (!voiceLoaded && !voiceMissing) {
+      // Asked for before js/voice-data.js has arrived: play it if the audio comes
+      // soon, otherwise leave just the caption (never the robot voice for this).
+      const seq = voiceSeq;
+      let late = false;
+      vstats.waited++;
+      const timer = setTimeout(() => { late = true; vstats.dropped++; }, VOICE_WAIT * 1000);
+      voiceSettled.then(() => {
+        if (late) return;
+        clearTimeout(timer);
+        if (seq !== voiceSeq || !ctx || ctx.state !== 'running') return;
+        if (V.a) playVoice(id); else speakFallback(id);
+      });
+    } else speakFallback(id);
+    return dur;
+  }
+  function playVoice(id) {
     const go = (buf) => {
       if (!buf) return speakFallback(id);
       const s = ctx.createBufferSource();
@@ -393,21 +507,36 @@ AT.audio = (() => {
       activeVoices.add(s);
       s.onended = () => activeVoices.delete(s);
       duckFor(buf.duration);
+      vstats.played++;
     };
-    if (voiceBufs[id]) go(voiceBufs[id]);
-    else decodeVoice(ctx, id).then((b) => { voiceBufs[id] = b; go(b); });
-    return dur;
+    const cached = cachedVoice(id);
+    if (cached) return go(cached);
+    const seq = voiceSeq;
+    voiceBuf(id).then((buf) => { if (seq === voiceSeq && ctx) go(buf); });
   }
   const TEXT = (id) => (window.AT_VOICE && window.AT_VOICE[id] ? window.AT_VOICE[id].t : AT.LINES && AT.LINES[id]) || '';
   const estimate = (id) => Math.max(1.2, TEXT(id).split(/\s+/).length * 0.42);
   function speakFallback(id) {
     if (muted || !('speechSynthesis' in window)) return;
+    vstats.fallbacks++;
     try {
       const u = new SpeechSynthesisUtterance(TEXT(id));
       u.rate = 0.95; u.pitch = 1.15;
       speechSynthesis.speak(u);
     } catch (e) { /* no speech */ }
   }
+
+  // ---------- page hidden ----------
+  // Pause all sound while the page is hidden: the engine clock stops then too, so
+  // narration stays in step with its captions, and nothing plays or schedules in the
+  // background. (Not while recording or in the stepped test mode.) unlock() on the
+  // next tap still resumes a context iOS has interrupted. Shares pauseSound() with
+  // hold(), so a resize repaint still under way when the page comes back keeps it quiet.
+  document.addEventListener('visibilitychange', () => {
+    const E = AT.engine;
+    if (!ctx || rec.on || !E || E.recording || E.manual) return;
+    pauseSound('hidden', document.hidden);
+  });
 
   // ---------- mute ----------
   function setMuted(m) {
@@ -475,6 +604,9 @@ AT.audio = (() => {
 
   return {
     init, unlock, hold, sfx, music, stopMusic, voice, stopVoice, setMuted, renderOffline, rec,
+    prefetch, loadCartoonVoices,
+    // narration memory and loading counters (tests and tools/perf.mjs)
+    stats() { return { ...vstats, buffers: voiceBufs.size, decodingNow: decoding.size, voiceLoaded, scene: voiceScene }; },
     get muted() { return muted; },
     get ready() { return !!ctx && ctx.state === 'running'; },
     get ctx() { return ctx; },

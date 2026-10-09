@@ -48,7 +48,7 @@ for (const [name, [args, key]] of Object.entries(CONFIGS)) {
 }
 
 const METRICS = ['titleShown', 'titlePainted', 'titleLive', 'frameP50', 'frameP95', 'rasterMsPerFrame', 'maxLongTaskPlay',
-  'playFrameP95', 'maxLongTaskIdle', 'transitionMax', 'sceneFrameP95', 'warm', 'fcp', 'longTaskMs', 'maxLongTask', 'heapMB', 'errors'];
+  'playFrameP95', 'maxLongTaskIdle', 'transitionMax', 'sceneFrameP95', 'warm', 'voiceAudio', 'fcp', 'longTaskMs', 'maxLongTask', 'heapMB', 'errors'];
 const fails = [];
 const fmt = (v) => (v == null ? '-' : String(v));
 for (const name of Object.keys(CONFIGS)) {

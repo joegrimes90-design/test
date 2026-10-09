@@ -2,6 +2,7 @@
 //   node tools/perf.mjs [--cpu 4] [--runs 3] [--json out.json] [--dpr 2] [--page /index.html]
 //                       [--scenes] [--revisit] [--trace] [--play] [--play-cap 45000] [--play-speed 2]
 //                       [--title-frames 120] [--scene-frames 60] [--title-cap 12000] [--scene-cap 5000]
+//                       [--net 1600,150]
 //
 // Opens index.html in headless Chromium with the CPU slowed down (like a
 // tablet), and reports how long it takes to reach each milestone (ms after
@@ -16,6 +17,12 @@
 //   maxLongTaskIdle longest task after the title was painted, outside scene transitions
 //                   (at:go:X .. at:shown:X) and outside --play: only idle frames (the title
 //                   and each scene just after it is entered), nobody tapping anything
+//   voiceAudio      when the narration audio arrived (at:voice: js/voice-data.js, loaded after
+//                   boot, has run); waited for up to 30 s after the rest is measured
+// --page     the page to load; --page /dist/atticus.html measures the one-file artifact
+//            bundle (rebuilt first with tools/build-artifact.mjs).
+// --net kbps,rtt  emulates a network (download kbit/s, round trip ms) and serves text
+//            files gzipped, like a web host.
 // --scenes   then visits hub, potty, teeth, baby, tv and party with AT.go and reports, per
 //            scene, the phases faded/dom/raster/built/shown/painted relative to the AT.go call
 //            and the scene's frame p50/p95 (up to --scene-frames intervals or --scene-cap ms).
@@ -32,10 +39,12 @@
 //            playFrameP95 (the worst scene's rAF p95 while playing), per scene under play.*
 import { chromium } from 'playwright';
 import { prepare } from '../tests/helpers/game.mjs';
+import { execFileSync } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 
 if (!process.env.PLAYWRIGHT_BROWSERS_PATH && fs.existsSync('/opt/pw-browsers')) process.env.PLAYWRIGHT_BROWSERS_PATH = '/opt/pw-browsers';
 
@@ -50,14 +59,27 @@ const SCENES = flag('scenes'), REVISIT = flag('revisit'), TRACE = flag('trace'),
 const PLAY_CAP = +arg('play-cap', 45000), PLAY_SPEED = +arg('play-speed', 2);
 const PLAY_SCENES = ['potty', 'teeth'];
 const SCENE_LIST = ['hub', 'potty', 'teeth', 'baby', 'tv', 'party'];
+const NET = arg('net', null) && arg('net').split(',').map(Number); // [kbps, rttMs]
+if (PAGE === '/dist/atticus.html') execFileSync(process.execPath, [path.join(root, 'tools/build-artifact.mjs')], { stdio: 'inherit' });
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.mp4': 'video/mp4', '.webm': 'video/webm', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.png': 'image/png', '.json': 'application/json', '.woff2': 'font/woff2' };
 
 const server = http.createServer((req, res) => {
   const p = path.join(root, decodeURIComponent(req.url.split('?')[0]));
   if (!p.startsWith(root) || !fs.existsSync(p) || fs.statSync(p).isDirectory()) { res.writeHead(404); return res.end(); }
-  res.writeHead(200, { 'content-type': types[path.extname(p)] || 'application/octet-stream', 'cache-control': 'no-store' });
+  const headers = { 'content-type': types[path.extname(p)] || 'application/octet-stream', 'cache-control': 'no-store' };
+  if (NET && /^(text|application\/json)/.test(headers['content-type']) && /gzip/.test(req.headers['accept-encoding'] || '')) {
+    res.writeHead(200, { ...headers, 'content-encoding': 'gzip' });
+    return res.end(gzipped(p));
+  }
+  res.writeHead(200, headers);
   fs.createReadStream(p).pipe(res);
 });
+const gzCache = new Map();
+function gzipped(p) {
+  const key = p + ':' + fs.statSync(p).mtimeMs;
+  if (!gzCache.has(key)) gzCache.set(key, zlib.gzipSync(fs.readFileSync(p)));
+  return gzCache.get(key);
+}
 await new Promise((r) => server.listen(0, r));
 const base = `http://localhost:${server.address().port}`;
 
@@ -267,12 +289,20 @@ async function measureLoad(page, cdp, opts = {}) {
       heapMB: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null,
     };
   }));
+  // when the narration audio (js/voice-data.js, loaded after boot) arrived; on a slow
+  // --net it can arrive after the title, so wait a little for it
+  await page.waitForFunction(() => performance.getEntriesByName('at:voice').length > 0, null, { timeout: 30000, polling: 100 }).catch(() => {});
+  r.voiceAudio = await page.evaluate(() => { const e = performance.getEntriesByName('at:voice')[0]; return e ? Math.round(e.startTime) : null; });
   return r;
 }
 
 async function setupPage(ctx, page) {
   const cdp = await ctx.newCDPSession(page);
   await cdp.send('Performance.enable');
+  if (NET) {
+    await cdp.send('Network.enable');
+    await cdp.send('Network.emulateNetworkConditions', { offline: false, latency: NET[1], downloadThroughput: (NET[0] * 1000) / 8, uploadThroughput: (NET[0] * 1000) / 8 });
+  }
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
@@ -309,7 +339,7 @@ async function oneRun() {
 
 const KEYS = ['fcp', 'domContentLoaded', 'boot', 'warm', 'titleBuilt', 'titleShown', 'titlePainted', 'titleLive', 'titleFrame',
   'frameP50', 'frameP95', 'rasterMsPerFrame', 'longTasks', 'longTaskMs', 'maxLongTask', 'maxLongTaskIdle', 'longTaskIdleMs',
-  'maxLongTaskPlay', 'longTaskPlayMs', 'playFrameP95', 'transitionMax', 'sceneFrameP95', 'scriptSec', 'taskSec', 'heapMB', 'errors'];
+  'maxLongTaskPlay', 'longTaskPlayMs', 'playFrameP95', 'transitionMax', 'sceneFrameP95', 'scriptSec', 'taskSec', 'heapMB', 'voiceAudio', 'errors'];
 const PLAY_KEYS = ['sec', 'actions', 'gameClock', 'frameP50', 'frameP95', 'frameMax', 'maxLongTask', 'longTaskMs', 'longTasks'];
 const SCENE_KEYS = ['faded', 'dom', 'raster', 'built', 'shown', 'painted', 'frameP50', 'frameP95'];
 function summarise(runs) {
@@ -337,9 +367,9 @@ for (let i = 0; i < RUNS; i++) {
   const r = await oneRun();
   runs.push(r);
   const c = r.cold || r;
-  console.error(`run ${i + 1}: title shown at ${c.titleShown} ms, painted at ${c.titlePainted} ms${r.revisit ? `; revisit shown at ${r.revisit.titleShown} ms` : ''}${c.frameP95 != null ? `; frames p95 ${c.frameP95} ms` : ''}${c.rasterMsPerFrame != null ? `; raster ${c.rasterMsPerFrame} ms/frame` : ''}`);
+  console.error(`run ${i + 1}: title shown at ${c.titleShown} ms, painted at ${c.titlePainted} ms${r.revisit ? `; revisit shown at ${r.revisit.titleShown} ms` : ''}${c.frameP95 != null ? `; frames p95 ${c.frameP95} ms` : ''}${c.rasterMsPerFrame != null ? `; raster ${c.rasterMsPerFrame} ms/frame` : ''}${c.voiceAudio != null ? `; voice audio at ${c.voiceAudio} ms` : ''}`);
 }
-const summary = { cpuThrottle: CPU, runs: RUNS, page: PAGE, dpr: DPR };
+const summary = { cpuThrottle: CPU, runs: RUNS, page: PAGE, dpr: DPR, ...(NET ? { net: { kbps: NET[0], rttMs: NET[1] } } : {}) };
 if (REVISIT) {
   summary.cold = summarise(runs.map((r) => r.cold));
   summary.revisit = summarise(runs.map((r) => r.revisit));
