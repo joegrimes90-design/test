@@ -84,7 +84,24 @@ The limits: whole image PSNR ≥ 32 dB, SSIM ≥ 0.97, sharpness 0.89–1.10, sh
 
 **Updating baselines.** Run `npm run test:update-baselines` after a change that is *meant* to look different. Look at the new PNGs before committing them. Baselines depend on the browser build and fonts (these come from Playwright 1.56.1's headless Chromium on Linux). On another machine, record them first from unchanged code.
 
-**Performance.** `npm run perf` runs `tools/perf.mjs` without throttling and with 4x CPU throttling. It fails if `titleShown` or `frameP95` exceeds `tests/perf/budget.json`; the other numbers are shown for information. The budgets are the optimisation targets, so today's code fails them: `tests/perf/baseline.json` shows the title fading in after 4.0 s and frames taking 400 ms. Re-record the baseline with `npm run perf -- --update-baseline`. Today it takes about 6 minutes, because every frame is slow.
+**Performance.** `npm run perf` (`tests/perf/check.mjs`) runs `tools/perf.mjs` in three configurations and prints every metric next to `tests/perf/budget.json` and `tests/perf/baseline.json`. It fails if a budgeted metric is over budget; the `stretch` block is printed but never fails. The budgets are the optimisation targets, so code that has not reached them fails.
+
+| configuration | `tools/perf.mjs` flags | what it adds |
+|---|---|---|
+| `noThrottle` | `--cpu 1 --scenes --trace` | frame pacing and raster cost on the title, then every scene transition |
+| `cpu4` | `--cpu 4` | 4x CPU throttling, like a tablet |
+| `revisit` | `--cpu 1 --revisit --scenes` | a persistent profile loaded twice; the budgets read the second load |
+
+The main metrics (milliseconds after navigation start unless noted):
+
+- `titleShown`: the title has faded in (game mark `at:shown:title`). `titlePainted`: two animation frames later, when the faded-in title is on screen (marked in the page, so Playwright round trips don't count). `titleLive`: the title is animating (`at:live:title` when the game marks it, else `titlePainted`).
+- `frameP50`/`frameP95`: animation-frame intervals on the title (16.7 = 60 fps), up to 120 frames or 12 s.
+- `rasterMsPerFrame` (`--trace`): tile raster time on the compositor worker threads per frame drawn, from a 3 s Chromium trace 1 s after the title is painted.
+- `maxLongTaskPlay`: the longest main-thread task after the title is painted that does not overlap a scene transition (`at:go:X` to `at:shown:X`).
+- `--scenes`: per scene (hub, potty, teeth, baby, tv, party, entered with `AT.go`), the game marks `faded`, `dom`, `raster`, `built`, `shown` and `painted` relative to the `AT.go` call, plus the scene's frame p50/p95 (up to 60 frames or 5 s). `transitionMax` is the slowest `shown`; `sceneFrameP95` the worst scene p95.
+- `--revisit`: every run uses a fresh persistent profile, loads the page (`cold.*`), then loads it again (`revisit.*`).
+
+Other flags: `--runs N` (default 3, medians are reported), `--json out.json`, `--dpr 2`, `--page /dist/atticus.html`, `--title-frames N`/`--title-cap ms`, `--scene-frames N`/`--scene-cap ms`. `npm run perf -- --only noThrottle,cpu4` runs some of the configurations, and `npm run perf -- --update-baseline` re-records `baseline.json`. With the SVG sprites the first baseline came from, it takes about 11 minutes, because every frame is slow.
 
 ## Credits
 

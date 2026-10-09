@@ -1,28 +1,174 @@
 {
-  "recorded": "2026-10-09T04:39:00.411Z",
+  "recorded": "2026-10-09T06:33:52.392Z",
   "runs": 3,
   "machine": "4 CPUs, linux",
   "note": "headless Chromium, 1280x720 at deviceScaleFactor 2 (tools/perf.mjs)",
   "noThrottle": {
-    "titleShown": 4002,
+    "titleShown": 4036,
+    "titlePainted": 4820,
+    "titleLive": 4820,
     "frameP50": 366.7,
     "frameP95": 400,
-    "warm": 426,
-    "fcp": 64,
-    "longTaskMs": 4285,
-    "maxLongTask": 501,
+    "rasterMsPerFrame": 654.9,
+    "maxLongTaskPlay": 578,
+    "transitionMax": 8851,
+    "sceneFrameP95": 416.6,
+    "warm": 420,
+    "fcp": 56,
+    "longTaskMs": 84139,
+    "maxLongTask": 590,
+    "heapMB": 10,
+    "errors": 0,
+    "scenes": {
+      "hub": {
+        "faded": 3359,
+        "dom": 3364,
+        "raster": null,
+        "built": 3365,
+        "shown": 8851,
+        "painted": 9979,
+        "frameP50": 83.3,
+        "frameP95": 300
+      },
+      "potty": {
+        "faded": 3225,
+        "dom": 3231,
+        "raster": null,
+        "built": 3758,
+        "shown": 6675,
+        "painted": 7309,
+        "frameP50": 50,
+        "frameP95": 99.9
+      },
+      "teeth": {
+        "faded": 1781,
+        "dom": 1784,
+        "raster": null,
+        "built": 1784,
+        "shown": 3215,
+        "painted": 3798,
+        "frameP50": 66.7,
+        "frameP95": 300
+      },
+      "baby": {
+        "faded": 923,
+        "dom": 929,
+        "raster": null,
+        "built": 1235,
+        "shown": 3490,
+        "painted": 4173,
+        "frameP50": 83.4,
+        "frameP95": 183.3
+      },
+      "tv": {
+        "faded": 1576,
+        "dom": 1582,
+        "raster": null,
+        "built": 1925,
+        "shown": 4059,
+        "painted": 4743,
+        "frameP50": 83.3,
+        "frameP95": 333.3
+      },
+      "party": {
+        "faded": 1587,
+        "dom": 1594,
+        "raster": null,
+        "built": 1924,
+        "shown": 4887,
+        "painted": 5696,
+        "frameP50": 366.6,
+        "frameP95": 416.6
+      }
+    }
+  },
+  "cpu4": {
+    "titleShown": 5310,
+    "titlePainted": 6094,
+    "titleLive": 6094,
+    "frameP50": 383.3,
+    "frameP95": 416.6,
+    "maxLongTaskPlay": 428,
+    "warm": 1889,
+    "fcp": 132,
+    "longTaskMs": 16456,
+    "maxLongTask": 453,
     "heapMB": 10,
     "errors": 0
   },
-  "cpu4": {
-    "titleShown": 6501,
-    "frameP50": 550,
-    "frameP95": 616.6,
-    "warm": 1700,
-    "fcp": 128,
-    "longTaskMs": 6410,
-    "maxLongTask": 742,
+  "revisit": {
+    "titleShown": 4656,
+    "titlePainted": 5440,
+    "titleLive": 5440,
+    "maxLongTaskPlay": 863,
+    "transitionMax": 8506,
+    "warm": 1436,
+    "fcp": 1088,
+    "longTaskMs": 49814,
+    "maxLongTask": 863,
     "heapMB": 10,
-    "errors": 0
+    "errors": 0,
+    "scenes": {
+      "hub": {
+        "faded": 2803,
+        "dom": 2806,
+        "raster": null,
+        "built": 2807,
+        "shown": 8506,
+        "painted": 10048,
+        "frameP50": null,
+        "frameP95": null
+      },
+      "potty": {
+        "faded": 3248,
+        "dom": 3253,
+        "raster": null,
+        "built": 3844,
+        "shown": 6541,
+        "painted": 7253,
+        "frameP50": null,
+        "frameP95": null
+      },
+      "teeth": {
+        "faded": 1676,
+        "dom": 1678,
+        "raster": null,
+        "built": 1678,
+        "shown": 3394,
+        "painted": 3975,
+        "frameP50": null,
+        "frameP95": null
+      },
+      "baby": {
+        "faded": 2128,
+        "dom": 2135,
+        "raster": null,
+        "built": 2529,
+        "shown": 6257,
+        "painted": 7272,
+        "frameP50": null,
+        "frameP95": null
+      },
+      "tv": {
+        "faded": 2689,
+        "dom": 2694,
+        "raster": null,
+        "built": 3155,
+        "shown": 6703,
+        "painted": 7589,
+        "frameP50": null,
+        "frameP95": null
+      },
+      "party": {
+        "faded": 2827,
+        "dom": 2850,
+        "raster": null,
+        "built": 3421,
+        "shown": 7625,
+        "painted": 8424,
+        "frameP50": null,
+        "frameP95": null
+      }
+    }
   }
 }

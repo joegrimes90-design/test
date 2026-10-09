@@ -56,6 +56,7 @@
     going = true;
     mark(`at:go:${name}`);
     if (AT.sceneName) await E.fadeTo(1, 0.35);
+    mark(`at:faded:${name}`);
     E.newToken();
     AT.audio.stopVoice();
     voiceEnd = 0;
@@ -70,6 +71,7 @@
     AT.sceneName = name;
     document.body.dataset.scene = name;
     const ctx = sc.build(params) || {};
+    mark(`at:dom:${name}`);
     await AT.imagesReady(E.stage, 2500);
     mark(`at:built:${name}`);
     await E.fadeTo(0, 0.45);
