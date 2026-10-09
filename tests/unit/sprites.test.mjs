@@ -2,80 +2,13 @@
 // into a well-formed SVG with a sensible box and only known filters.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadGame, gameSources, read } from '../helpers/load-game.mjs';
+import { loadGame, read } from '../helpers/load-game.mjs';
+import { usedSprites, literals } from '../helpers/sprite-uses.mjs';
 
 const game = loadGame();
 const A = game.AT.art;
 const ids = [...A.list()]; // copy: arrays from the vm realm fail deepStrictEqual
 const defined = new Set(ids);
-const sources = gameSources().filter(({ file }) => !/art-(core|characters|props|scenes)\.js$/.test(file));
-
-// Quoted strings in an expression, ignoring comparison operands.
-const literals = (expr) => [...expr.replace(/[!=]==?\s*'[^']*'/g, '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
-// Text of `const NAME = [ ... ]` or `NAME = { ... }` in a file.
-const constBody = (src, name) => {
-  const m = new RegExp(`(?:const|let)\\s+${name}\\s*=\\s*([\\[{])`).exec(src);
-  if (!m) return null;
-  const open = m[1], close = open === '[' ? ']' : '}';
-  let depth = 0;
-  for (let i = m.index + m[0].length - 1; i < src.length; i++) {
-    if (src[i] === open) depth++;
-    else if (src[i] === close && --depth === 0) return src.slice(m.index + m[0].length, i);
-  }
-  return null;
-};
-// Argument number `n` (0-based) of the call starting at `start` (just after the "(")
-function argAt(src, start, n) {
-  let depth = 0, cur = '', idx = 0;
-  for (let i = start; i < src.length; i++) {
-    const ch = src[i];
-    if ('([{'.includes(ch)) depth++;
-    if (')]}'.includes(ch)) { if (depth === 0) return idx === n ? cur : null; depth--; }
-    if (ch === ',' && depth === 0) { if (idx === n) return cur; idx++; cur = ''; continue; }
-    cur += ch;
-  }
-  return null;
-}
-
-function usedSprites() {
-  const uses = []; // {file, id, how}
-  const add = (file, how, list) => list.forEach((id) => uses.push({ file, id, how }));
-  for (const { file, src } of sources) {
-    // { sprite: 'x' } and { sprite: cond ? 'a' : 'b' } and { sprite: E.pick(list) }
-    for (const m of src.matchAll(/sprite\s*:\s*([^,}]+)/g)) {
-      const expr = m[1];
-      add(file, 'sprite:', literals(expr.replace(/'\w+'\s*\+\s*\w+/g, '')));
-      const pick = /E\.pick\((\w+)\)/.exec(expr);
-      if (pick) add(file, `E.pick(${pick[1]})`, literals(constBody(src, pick[1]) || ''));
-      const concat = /'(\w+_)'\s*\+\s*(\w+)/.exec(expr);
-      if (concat) add(file, 'concat', ['potty', 'teeth', 'baby'].map((k) => concat[1] + k));
-    }
-    // AT.art.img/url/box('x'), node.swap('x'), node.add('x'), puppet.hold('x'), hudButton(id, 'x')
-    for (const m of src.matchAll(/(AT\.art\.(?:img|url|box)|\.swap|(?<!classList)\.add|\.hold)\(/g)) {
-      add(file, m[1], literals(argAt(src, m.index + m[0].length, 0) || ''));
-    }
-    for (const m of src.matchAll(/hudButton\(/g)) add(file, 'hudButton', literals(argAt(src, m.index + m[0].length, 1) || ''));
-    // hub.js mk('room_teeth', x, y) helper
-    for (const m of src.matchAll(/\bmk\('([^']+)'/g)) add(file, 'mk', [m[1]]);
-    // baby.js think(c, 'teddy', s)
-    for (const m of src.matchAll(/this\.think\(/g)) add(file, 'think', literals(argAt(src, m.index + m[0].length, 1) || ''));
-    // particles: E.burst(layer, sprites, ...) and E.floatUp(layer, sprite, ...)
-    for (const m of src.matchAll(/E\.(burst|floatUp)\(/g)) {
-      const arg = (argAt(src, m.index + m[0].length, 1) || '').trim();
-      if (/^\w+$/.test(arg)) {
-        const body = constBody(src, arg);
-        if (body) add(file, `${m[1]}(${arg})`, literals(body));
-      } else add(file, m[1], literals(arg));
-    }
-    // lists of sprite names handed around: badge: 'x', badgeFor = {...}, bugSprites = [...], colours = [...]
-    for (const m of src.matchAll(/badge\s*:\s*'([^']+)'/g)) add(file, 'badge:', [m[1]]);
-    for (const name of ['badgeFor', 'bugSprites', 'sprites', 'colours']) {
-      const body = constBody(src, name);
-      if (body && /'\w+_\w+'|'confetti\d'/.test(body)) add(file, name, literals(body).filter((s) => /_|\d/.test(s) && !s.startsWith('#')));
-    }
-  }
-  return uses;
-}
 
 test('the art engine defines ~150 sprites', () => {
   assert.ok(ids.length >= 140, `${ids.length} sprites`);

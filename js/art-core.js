@@ -899,12 +899,13 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   // a cheap one that was not painted on the spot because an input handler asked for it;
   // otherwise the SVG stays). New bitmaps are painted at bucketUp(k, bucket) when bucket is
   // set (few keys for ever-changing scales).
-  function showAtLeast(im, k, { slack = 1.002, bucket = 0, async = 'always' } = {}) {
+  function showAtLeast(im, k, { slack = 1.002, bucket = 0, async = 'always', raw = 0 } = {}) {
     const id = im.dataset.sprite;
     if (!sprites[id] || !(k >= 0.01) || !isFinite(k)) return;
     const kb = +im.dataset.k || 0;
     if (kb >= k / 1.01 && kb <= k * slack) return; // what it shows will do
     let e = cache.get(keyOf(id, k)) || cachedBetween(id, k, k * slack);
+    if (!e && bucket) note(id, raw || k, bucket);
     const kk = e ? e.k : bucket ? bucketUp(k, bucket) : round3(k);
     const key = keyOf(id, kk);
     if (im._atWant === key && jobs.has(key)) return; // already on its way (SVG meanwhile)
@@ -933,24 +934,61 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     for (let el = im.parentElement; el; el = el.parentElement) if (el._atTween > 0) return true;
     return false;
   }
+  // ... or one that has just ended (its exact refit follows: tweenEnd)
+  function settling(im) {
+    for (let el = im.parentElement; el; el = el.parentElement) if (el._atSettle > 0) return true;
+    return false;
+  }
   // 2^(ceil(n*log2 k)/n): n=4 for particles (at most 19% above), n=8 for scale tweens (9%),
   // n=32 for scales that change every frame (2.2%)
   const bucketUp = (k, n) => round3(Math.pow(2, Math.ceil(n * Math.log2(k) - 1e-6) / n));
+
+  // ----- sprite log (?spritelog=1, for tools/sprite-manifest.mjs) -----
+  // Every bitmap request, relative to the stage: [scene, sprite, scale / (stage scale x
+  // devicePixelRatio), steps]: steps 0 for an exact scale; 8 (scale tweens) or 32 (scales
+  // that change every frame) for a request rounded up to the next 2^(1/steps) step, one row
+  // per step; 4 for particles (random sizes), as two rows: the lowest and highest seen.
+  const spriteLog = params.get('spritelog') === '1' ? new Map() : null;
+  const unitScale = () => dpr() * ((AT.engine && AT.engine.scale) || 1);
+  function note(id, raw, n) {
+    const sc = spriteLog && AT.sceneName;
+    if (!sc || !(raw > 0)) return;
+    const rel = raw / unitScale();
+    const key = n === 4 ? `${sc}|${id}|4` : n ? `${sc}|${id}|${n}|${bucketUp(raw, n)}` : `${sc}|${id}|0|${rel.toFixed(7)}`;
+    const e = spriteLog.get(key);
+    if (!e) spriteLog.set(key, [sc, id, rel, n, rel]);
+    else { e[2] = Math.min(e[2], rel); e[4] = Math.max(e[4], rel); }
+  }
+  const spriteLogRows = () => {
+    const out = [];
+    for (const [sc, id, lo, n, hi] of spriteLog ? spriteLog.values() : []) { out.push([sc, id, lo, n]); if (n === 4 && hi !== lo) out.push([sc, id, hi, n]); }
+    return out;
+  };
   // Particles (E.burst/E.floatUp: data-kmax on the node = the largest scale it reaches)
   // get a bitmap for that scale, in coarse buckets.
   const kmaxOf = (im) => { const par = im.parentElement; return par && par.dataset ? +par.dataset.kmax || 0 : 0; };
-  function kWanted(im, pass) {
+  // The device scale an img wants, before rounding: [scale, steps] (steps 4: a particle, whose
+  // bitmap is for the next 2^(1/4) step up; 0: exact, rounded to 3 decimals).
+  function wantedRaw(im, pass) {
     const kmax = kmaxOf(im);
     if (kmax) {
       const host = im.parentElement.parentElement;
-      return host ? bucketUp(scaleOf(cumMatrix(host, pass)) * kmax, 4) : 0;
+      return [host ? scaleOf(cumMatrix(host, pass)) * kmax : 0, 4];
     }
-    if (animated(im, pass)) return kPeak(im);
-    return kOf(im, pass);
+    // (under a CSS animation: at its peak)
+    const M = animated(im, pass) ? peakMatrix(im) : deviceMatrix(im, pass);
+    return [M ? scaleOf(M) : 0, 0];
+  }
+  const kFrom = (raw, n) => (!(raw > 0) ? 0 : n ? bucketUp(raw, n) : round3(raw));
+  function kWanted(im, pass) {
+    const [raw, n] = wantedRaw(im, pass);
+    return kFrom(raw, n);
   }
   function fitOne(im, pass, defer) {
     if (mode !== 'bitmap' || underTween(im)) return null; // tweens refit when they end
-    return want(im, kWanted(im, pass), defer);
+    const [raw, n] = wantedRaw(im, pass);
+    note(im.dataset.sprite, raw, n);
+    return want(im, kFrom(raw, n), defer);
   }
   // Fit every sprite img under root to its current device scale. Resolves once all are bitmaps
   // (or have stayed SVG). opts.onProgress(fraction) reports painted area (cw*ch) over the total.
@@ -1034,16 +1072,26 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     // the largest device scale each img reaches (set, measure, restore: nothing paints in between)
     node.set(big);
     const pass = new Map();
-    const need = imgs.map((im) => kWanted(im, pass));
+    const need = imgs.map((im) => wantedRaw(im, pass));
     node.set(cur);
-    imgs.forEach((im, i) => showAtLeast(im, round3(need[i] * tuning.oversample), { slack: 1.19, bucket: 8, async: 'input' }));
+    imgs.forEach((im, i) => showAtLeast(im, round3(kFrom(need[i][0], need[i][1]) * tuning.oversample), { slack: 1.19, bucket: 8, async: 'input', raw: need[i][0] * tuning.oversample }));
   }
   function tweenEnd(node) {
     if (node.el._atTween > 0) node.el._atTween--;
     if (mode !== 'bitmap') return;
-    // exact refit, unless the node is removed as soon as the tween resolves (foam, bubbles)
+    // Exact refit, unless the node is removed as soon as the tween resolves (foam, bubbles).
+    // Until then its sprites are left alone by checkScales: the tween's last frame would
+    // otherwise ask for the 2^(1/32) step at the end scale (painted on the spot, as an
+    // oscillation's: a card's sink at 2.6x blocked the page for over 100 ms) just before
+    // the exact one, or for a node about to be removed.
     busy++;
-    later(() => later(() => { busy--; if (node.el.isConnected && !(node.el._atTween > 0)) fit(node.el); else checkIdle(); }));
+    const el = node.el;
+    el._atSettle = (el._atSettle || 0) + 1;
+    later(() => later(() => {
+      busy--;
+      el._atSettle--;
+      if (el.isConnected && !(el._atTween > 0)) fit(el); else checkIdle();
+    }));
   }
 
   // ----- scales that change outside tweens -----
@@ -1079,11 +1127,11 @@ ${ink('ks', 1.6, 1.6, 0.25)}
         im._atMoved = t;
         if (held) continue;
         const kb = +im.dataset.k || 0;
-        if (!kb || kmaxOf(im) || underTween(im)) continue; // SVG is exact; particles and tweens are handled apart
-        const kd = kOf(im, pass);
+        if (!kb || kmaxOf(im) || underTween(im) || settling(im)) continue; // SVG is exact; particles and tweens are handled apart
+        const M0 = deviceMatrix(im, pass), raw = M0 ? scaleOf(M0) : 0, kd = round3(raw);
         if (!(kd >= 0.01)) continue;
-        if (kd > kb * 1.01) { if (!useCached(im, kd, pass)) ratchet(im, kd); }
-        else if (kb > kd * TRACK && !useCached(im, kd, pass)) offer(im, kd);
+        if (kd > kb * 1.01) { note(im.dataset.sprite, raw, 32); if (!useCached(im, kd, pass)) ratchet(im, kd); }
+        else if (kb > kd * TRACK) { note(im.dataset.sprite, raw, 32); if (!useCached(im, kd, pass)) offer(im, kd); }
         // A lone sprite pulsing in place (the Play button) whose bitmap happens to be at its exact
         // scale right now: on the pixel grid, it is shown exactly as painted (half a pixel off, it
         // would look blurred). Only for uniform scaling of a node holding just this sprite: puppet
@@ -1189,7 +1237,8 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       im._atO = [M.e, M.f];
       im._atStill = still;
       const anim = animated(im, pass);
-      const kd = anim ? kPeak(im) : round3(scaleOf(M));
+      const raw = anim ? scaleOf(peakMatrix(im)) : scaleOf(M);
+      const kd = round3(raw);
       const prev = im._atK;
       im._atK = kd;
       if (!(kd >= 0.01)) continue;
@@ -1199,12 +1248,16 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       if (anim) {
         // a CSS animation (.hudbtn.pulse): the bitmap for its peak, SVG until that is ready
         im._atMoved = t;
+        note(id, raw, 0);
         showAtLeast(im, kd);
       } else if (!kb) {
+        note(id, raw, 0);
         if (!pending && !failed.has(keyOf(id, kd))) want(im, kd);
       } else if (kd > kb * 1.01) {
+        note(id, raw, 32);
         if (!useCached(im, kd, pass)) ratchet(im, kd);
       } else if (!near(kb, kd) && prev && near(prev, kd) && !(t - lastMoved(im) < REST)) {
+        note(id, raw, 0);
         if (!(pending && im._atWant === keyOf(id, kd))) want(im, kd);
       } else if (still) resnapOne(im, pass, M);
     }
@@ -1326,7 +1379,11 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     document.addEventListener('animationstart', (ev) => {
       const el = ev.target;
       if (mode !== 'bitmap' || held || !el || !el.querySelectorAll || !el.isConnected) return;
-      for (const im of el.querySelectorAll('img[data-sprite]')) showAtLeast(im, kPeak(im));
+      for (const im of el.querySelectorAll('img[data-sprite]')) {
+        const M = peakMatrix(im);
+        note(im.dataset.sprite, M ? scaleOf(M) : 0, 0);
+        showAtLeast(im, kPeak(im));
+      }
       checkIdle();
     }, true);
   }
@@ -1354,7 +1411,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   return {
     define, img, url, svgOf, box, has, list,
     get mode() { return mode; },
-    fit, idle, stats, cachedScales, setSprite, shows, kOf, kPeak, deviceMatrix, rasterize, estimate, tweenStart, tweenEnd,
+    fit, idle, stats, cachedScales, setSprite, shows, kOf, kPeak, deviceMatrix, rasterize, estimate, tweenStart, tweenEnd, spriteLog: spriteLogRows,
     sweep, audit, ready, cost, track, scaleChanged, resnapSoon, resized, hold, inexactToSvg,
     C, E, R, smooth, blob, fluff, puffs, star, heart, line, rng, group,
     mix, inkOf, shade, tint, SEPIA,
