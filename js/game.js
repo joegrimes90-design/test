@@ -57,6 +57,9 @@
     mark(`at:go:${name}`);
     if (AT.sceneName) await E.fadeTo(1, 0.35);
     mark(`at:faded:${name}`);
+    // Nothing under the cover paints while the scene is built and its sprite bitmaps
+    // are painted (live SVG frames would compete with the baking for the CPU).
+    E.stage.classList.add('covered');
     E.newToken();
     AT.audio.stopVoice();
     voiceEnd = 0;
@@ -72,7 +75,14 @@
     document.body.dataset.scene = name;
     const ctx = sc.build(params) || {};
     mark(`at:dom:${name}`);
-    await AT.imagesReady(E.stage, 2500);
+    // paint the scene's sprite bitmaps (the first scene drives the loading bar)
+    const bar = document.querySelector('#loading .fill');
+    await AT.art.fit(E.stage, { onProgress: bar ? (p) => { bar.style.width = (p * 100).toFixed(1) + '%'; } : null });
+    mark(`at:raster:${name}`);
+    const loading = document.getElementById('loading');
+    if (loading) loading.remove();
+    await AT.imagesReady(E.stage, 10000);
+    E.stage.classList.remove('covered');
     mark(`at:built:${name}`);
     await E.fadeTo(0, 0.45);
     mark(`at:shown:${name}`);
@@ -199,11 +209,23 @@
     b.setAttribute('aria-label', label);
     b.style.left = x + 'px';
     b.style.top = y + 'px';
+    // the icon, 80 px across and centred
     const im = AT.art.img(sprite);
-    im.style.left = '50%'; im.style.top = '50%';
-    im.style.width = '80px'; im.style.height = '80px';
-    im.style.transform = 'translate(-50%,-50%)';
-    b.appendChild(im);
+    if (AT.art.mode === 'svg') {
+      im.style.left = '50%'; im.style.top = '50%';
+      im.style.width = '80px'; im.style.height = '80px';
+      im.style.transform = 'translate(-50%,-50%)';
+      b.appendChild(im);
+    } else {
+      // a 0x0 holder at the button's centre scales the sprite's box (no percentages,
+      // so AT.art can work out the icon's device scale and map its bitmap 1:1)
+      const [, , bw, bh] = AT.art.box(sprite);
+      const holder = document.createElement('span');
+      Object.assign(holder.style, { position: 'absolute', left: '50px', top: '50px', width: '0', height: '0', transformOrigin: '0 0', transform: `scale(${80 / bw},${80 / bh})` });
+      im.style.left = -bw / 2 + 'px'; im.style.top = -bh / 2 + 'px';
+      holder.appendChild(im);
+      b.appendChild(holder);
+    }
     b.addEventListener('pointerdown', (ev) => { ev.preventDefault(); ev.stopPropagation(); AT.audio.unlock(); AT.audio.sfx('tap'); onTap(b); });
     E.hud.appendChild(b);
     return b;
@@ -212,8 +234,7 @@
     hudButton('btn-home', 'ui_home', 24, 20, () => { if (AT.sceneName !== 'title') AT.go(AT.sceneName === 'hub' ? 'title' : 'hub'); }, 'Home');
     const snd = hudButton('btn-sound', AT.audio.muted ? 'ui_mute' : 'ui_sound', 1476, 20, (b) => {
       AT.audio.setMuted(!AT.audio.muted);
-      const im = b.querySelector('img');
-      im.src = AT.art.url(AT.audio.muted ? 'ui_mute' : 'ui_sound');
+      AT.art.setSprite(b.querySelector('img'), AT.audio.muted ? 'ui_mute' : 'ui_sound');
     }, 'Sound on or off');
     const root = document.documentElement;
     if (root.requestFullscreen || root.webkitRequestFullscreen) {
@@ -258,19 +279,9 @@
     // Browsers only let sound start from these events (on touch screens pointerdown doesn't count).
     const unlock = () => AT.audio.unlock();
     ['pointerup', 'touchend', 'click', 'keydown'].forEach((ev) => document.addEventListener(ev, unlock, true));
-    // warm up the small sprites so they appear instantly later
-    const warm = document.getElementById('warm');
-    AT.art.list().filter((id) => !/^bg_|mouth_face|party_table|fg_hedge|bunting/.test(id)).forEach((id) => warm.appendChild(AT.art.img(id)));
-    const bar = document.querySelector('#loading .fill');
-    const imgs = [...warm.querySelectorAll('img')];
-    let done = 0;
-    await Promise.race([
-      Promise.all(imgs.map((im) => im.decode().catch(() => {}).then(() => { done++; if (bar) bar.style.width = (done / imgs.length) * 100 + '%'; }))),
-      new Promise((r) => setTimeout(r, 6000)),
-    ]);
-    warm.innerHTML = '';
+    // (No warm-up any more: decoding SVGs never painted them. The first scene's
+    // sprite bitmaps drive the loading bar, and AT.go removes it.)
     mark('at:warm');
-    document.getElementById('loading').remove();
     AT.go(startScene && AT.scenes[startScene] ? startScene : 'title');
   };
 })();

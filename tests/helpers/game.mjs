@@ -7,8 +7,9 @@
 // - stepUntil / advance / autoPlay: move the game clock in fixed steps.
 //   While the clock is fast-forwarded the stage is hidden (visibility only;
 //   layout and game logic are untouched), because painting this game's
-//   filter-heavy sprites costs 100-300 ms per frame. The stage is shown again
-//   for every tap/rub and before every screenshot.
+//   filter-heavy sprites costs 100-300 ms per frame (and live SVG sprites are
+//   shown until their bitmaps are painted). The stage is shown again for every
+//   tap/rub and before every screenshot.
 import { expect } from '@playwright/test';
 
 export const SEED = 20251009;
@@ -50,6 +51,16 @@ function pageInit({ seed, audio }) {
     return r.right > s.left && r.left < s.right && r.bottom > s.top && r.top < s.bottom;
   };
   const centre = (r) => ({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
+  // Centre of a sprite's box in CSS px, from the game's geometry rather than the
+  // <img> element, whose size differs a little between bitmap and SVG mode
+  // (AT.art), so both modes make exactly the same moves.
+  const spriteCentre = (im) => {
+    const M = window.AT && AT.art && AT.art.deviceMatrix && AT.art.deviceMatrix(im);
+    if (!M) return centre(im.getBoundingClientRect());
+    const b = AT.art.box(im.dataset.sprite), d = window.devicePixelRatio || 1;
+    const p = M.transformPoint(new DOMPoint(b[2] / 2, b[3] / 2));
+    return { x: p.x / d, y: p.y / d };
+  };
   const k = () => stage().getBoundingClientRect().width / 1600; // CSS px per stage px
   const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
   const opacityOf = (el) => parseFloat(el.style.opacity === '' ? 1 : el.style.opacity);
@@ -85,7 +96,7 @@ function pageInit({ seed, audio }) {
         // brushing hasn't started yet (narration still playing): wait a second
         if (lr && lr.el === dirt && lr.op === op && AT.engine.time - lr.time < 1) return null;
         auto.lastRub = { el: dirt, op, time: AT.engine.time };
-        const c = centre(dirt.getBoundingClientRect());
+        const c = spriteCentre(dirt);
         return { type: 'rub', path: auto.path(c.x, c.y, 40, 20), what: 'tooth_dirt' };
       }
       if (handPt) {
@@ -143,10 +154,13 @@ export async function prepare(page, { seed = SEED, audio = true } = {}) {
 }
 
 /** Load the game in manual-clock mode and wait until `scene` is built (clock still at 0). */
-export async function openGame(page, { scene = 'title', manual = true } = {}) {
+export async function openGame(page, { scene = 'title', manual = true, query = {} } = {}) {
   const q = new URLSearchParams();
   if (scene !== 'title') q.set('scene', scene);
   if (manual) q.set('manual', '1');
+  // AT_RASTER=svg runs a suite on the plain SVG sprites (the bitmap layer's kill switch)
+  if (process.env.AT_RASTER && !('raster' in query)) q.set('raster', process.env.AT_RASTER);
+  for (const [k, v] of Object.entries(query)) q.set(k, v);
   await page.goto('/index.html?' + q);
   await page.waitForFunction((s) => performance.getEntriesByName('at:built:' + s).length > 0, scene, { timeout: 60_000 });
 }
@@ -220,10 +234,11 @@ export async function autoPlay(page, until, { maxClock = 900, idleClock = 60, fp
   throw new Error(`auto-player gave up after ${maxActions} actions`);
 }
 
-/** Wait for fonts and every sprite image to be decoded, with the stage shown. */
+/** Wait for sprite bitmaps, fonts and every image to be decoded, with the stage shown. */
 export async function settleForScreenshot(page) {
   await reveal(page);
   await page.evaluate(async () => {
+    if (window.AT && AT.art && AT.art.idle) await AT.art.idle();
     await document.fonts.ready;
     await Promise.all([...document.querySelectorAll('img')].map((im) => im.decode().catch(() => {})));
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));

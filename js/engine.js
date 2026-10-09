@@ -116,13 +116,16 @@ AT.engine = (() => {
       if (target.set) target.set(vals); else Object.assign(target, vals);
       if (onUpdate) onUpdate(p);
     };
-    if (dur <= 0) { apply(1); return resolve(); }
+    // a node changing size: its sprite bitmaps must never be shown magnified (AT.art)
+    const scaled = target instanceof Node && ('s' in to || 'sx' in to || 'sy' in to) && AT.art && AT.art.tweenStart;
+    if (dur <= 0) { apply(1); if (scaled) AT.art.fit(target.el); return resolve(); }
+    if (scaled) AT.art.tweenStart(target, to, fn);
     const u = {
       token: tk,
       fn: () => {
         const p = Math.min(1, (E.time - start) / dur);
         apply(p);
-        if (p >= 1) { remove(u); resolve(); }
+        if (p >= 1) { remove(u); if (scaled) AT.art.tweenEnd(target); resolve(); }
       },
     };
     updaters.push(u);
@@ -213,9 +216,16 @@ AT.engine = (() => {
     const fit = () => {
       const vw = window.innerWidth, vh = window.innerHeight;
       E.scale = Math.min(vw / W, vh / H);
-      E.stage.style.transform = `translate(${(vw - W * E.scale) / 2}px,${(vh - H * E.scale) / 2}px) scale(${E.scale})`;
+      let ox = (vw - W * E.scale) / 2, oy = (vh - H * E.scale) / 2;
+      if (AT.art && AT.art.mode === 'bitmap') {
+        // whole device pixels, so sprite bitmaps can land 1:1 on the screen's pixels
+        const d = window.devicePixelRatio || 1;
+        ox = Math.round(ox * d) / d; oy = Math.round(oy * d) / d;
+      }
+      E.ox = ox; E.oy = oy;
+      E.stage.style.transform = `translate(${ox}px,${oy}px) scale(${E.scale})`;
     };
-    window.addEventListener('resize', fit);
+    window.addEventListener('resize', () => { fit(); if (AT.art && AT.art.fit) AT.art.fit(E.stage); });
     fit();
     E.camera.set({ x: 0, y: 0, zoom: 1 });
     if (E.manual) installTestHook();
@@ -225,12 +235,17 @@ AT.engine = (() => {
   // ---------- test hook (?manual=1, used by tests/ only) ----------
   // The clock stands still until a test calls `await __test.step(seconds, fps)`,
   // which advances it in fixed 1/fps steps through E.step(). Before each step it
-  // waits for pending image decodes, so slow decoding never shifts the timeline.
+  // waits for sprite bitmaps being painted (AT.art.idle) and pending image
+  // decodes, so slow painting or decoding never shifts the timeline.
   // With Math.random seeded by the test, every frame is reproducible.
   function installTestHook() {
     const ch = new MessageChannel();
     const yieldTask = () => new Promise((r) => { ch.port1.onmessage = r; ch.port2.postMessage(0); });
-    const settle = () => Promise.all([...E.stage.querySelectorAll('img')].map((im) => im.decode().catch(() => {}))).then(yieldTask);
+    const settle = async () => {
+      if (AT.art && AT.art.idle) await AT.art.idle();
+      await Promise.all([...E.stage.querySelectorAll('img')].map((im) => im.decode().catch(() => {})));
+      await yieldTask();
+    };
     window.__test = {
       async step(sec = 0, fps = 60) {
         const n = Math.max(1, Math.round(sec * fps));

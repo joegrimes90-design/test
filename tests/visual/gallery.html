@@ -33,10 +33,13 @@
     // a game Node: a 0x0 div moved with translate()/scale(), holding the sprite <img>
     AT.engine.node(root, { sprite: c.id }).set({ x: c.x - b[0] * c.s, y: c.y - b[1] * c.s, s: c.s });
   }
+  // the game's bitmap sprite layer (gallery.html?raster=svg shows the plain SVG images)
+  await AT.art.fit(root);
+  await AT.art.idle();
   await AT.imagesReady(document.body, 60000);
   await document.fonts.ready;
   await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-  window.__gallery = { name: page.name, width: page.width, height: page.height, cells: page.cells, pages: pages.map((p) => p.name) };
+  window.__gallery = { name: page.name, width: page.width, height: page.height, cells: page.cells, pages: pages.map((p) => p.name), mode: AT.art.mode };
 </script>
 </body>
 </html>

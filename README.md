@@ -26,7 +26,7 @@ Mistakes are never punished: a wrong choice gets a gentle "try again", and if no
 
 Plain HTML, CSS and JavaScript with no libraries.
 
-- **Art** (`js/art-*.js`) is drawn in code as SVG and painted with filters that imitate watercolour: wobbly edges, uneven pigment, darker rims where paint pools, and loose ink lines over a paper texture.
+- **Art** (`js/art-*.js`) is drawn in code as SVG and painted with filters that imitate watercolour: wobbly edges, uneven pigment, darker rims where paint pools, and loose ink lines over a paper texture. Browsers re-run those filters whenever anything moves over an SVG image, so each sprite `<img>` shows a PNG painted from its SVG once per exact device scale and mapped 1:1 onto the screen's pixels (`AT.art.fit`, in `js/art-core.js`). `?raster=svg` turns this off and shows the plain SVG images, exactly as before (the layer also falls back to them by itself if a boot self-check shows the browser can't paint SVG into a canvas at full resolution).
 - **Characters** (`js/characters.js`) are puppets made of painted parts that bend at the joints, with swappable faces.
 - **Sound** (`js/audio.js`): all sound effects and music are synthesised with the Web Audio API. Narration is pre-recorded neural speech stored in `js/voice-data.js`.
 - **Engine** (`js/engine.js`): every animation runs on one game clock, so the cartoons can be recorded frame by frame.
@@ -50,7 +50,7 @@ node render-videos.mjs             # or: node render-videos.mjs potty
 node playtest.mjs potty out/ 90 4  # auto-plays a scene and saves screenshots
 ```
 
-Developer URL options: `index.html?scene=teeth` jumps to a scene, `&speed=3` runs the clock faster, `&manual=1` stops the clock for tests (see Testing).
+Developer URL options: `index.html?scene=teeth` jumps to a scene, `&speed=3` runs the clock faster, `&manual=1` stops the clock for tests (see Testing), `&raster=svg` shows the sprites as plain SVG images (no bitmap layer).
 
 ## Testing
 
@@ -66,9 +66,9 @@ npm run perf                      # load and frame-rate budgets (not part of npm
 
 - **Unit** (`tests/unit/`, `node --test`): every spoken line exists in `tools/voice-lines.json` and `js/voice-data.js` with the same text; every sprite the code uses is defined and renders to well-formed SVG; scenes, cartoons and videos are wired up; every sound effect and music track renders (through a fake `OfflineAudioContext`); the clock and the test hook work; the game still runs from `file://` (no modules, no `fetch`) and still bundles with `tools/build-artifact.mjs`.
 - **End-to-end** (`tests/e2e/`): boots with no console errors; the title leads to the hub; an auto-player (the logic of `tools/playtest.mjs`) plays potty, teeth and baby to the end and earns each sticker; the last sticker starts the party; balloons pop; the TV plays a cartoon (WebM where H.264 is missing); Home, the sound toggle and "New day" work.
-- **Visual** (`tests/visual/`, 1280x720 at deviceScaleFactor 2): every sprite in a gallery (`gallery.html`, at natural size and at its largest in-game scale), plus frames of every scene and of the hand-washing and mouth close-ups.
+- **Visual** (`tests/visual/`, 1280x720 at deviceScaleFactor 2): every sprite in a gallery (`gallery.html`, at natural size and at its largest in-game scale, shown through the bitmap layer), plus frames of every scene and of the hand-washing and mouth close-ups. The baselines were recorded from the plain SVG sprites; `AT_RASTER=svg npm run test:visual` runs the suite on them (the `?raster=svg` kill switch), and must give PSNR ∞. `raster-parity.spec.mjs` renders the same frames with `?raster=svg` and with bitmaps in one run and compares them with much stricter limits; `RASTER_PARITY_SELFTEST=1 npx playwright test raster-parity` also renders known-bad variants of the layer and checks that each one fails those limits.
 
-**Deterministic mode.** Tests open `index.html?manual=1`: the clock only moves when the test calls `await __test.step(seconds, fps)`, and `Math.random` is seeded, so every frame is reproducible (two runs give bit-identical screenshots). While fast-forwarding, the tests hide the stage, because painting is the slow part. They show it again before every tap and screenshot.
+**Deterministic mode.** Tests open `index.html?manual=1`: the clock only moves when the test calls `await __test.step(seconds, fps)`, and `Math.random` is seeded, so every frame is reproducible (two runs give bit-identical screenshots). Each step, and every screenshot, first waits for `AT.art.idle()`: sprite bitmaps are painted between steps, never while the clock moves. While fast-forwarding, the tests hide the stage, because painting is the slow part. They show it again before every tap and screenshot.
 
 **Visual thresholds** (`tests/visual/thresholds.mjs`). Each screenshot is compared with its baseline using PSNR, SSIM, sharpness (gradient energy, new ÷ baseline) and mean colour shift. These are checked for the whole image, every 256 px tile, and every sprite in the gallery. The limits were set by rendering changes on purpose:
 

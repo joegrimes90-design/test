@@ -70,6 +70,8 @@ html, body {
   opacity: 0.55;
 }
 #fade { position: absolute; inset: 0; background: var(--paper); opacity: 1; pointer-events: none; }
+/* while #fade covers the stage (scene loading), nothing under it paints */
+#stage.covered > :not(#fade) { visibility: hidden; }
 
 /* captions: the words being spoken, for grown-ups reading along */
 #caption {
@@ -154,8 +156,6 @@ body[data-scene="title"] #btn-home, body.recording #hud { display: none; }
 }
 #loading .bar { width: min(420px, 70vw); height: 22px; border-radius: 12px; background: #efe2c8; overflow: hidden; }
 #loading .fill { width: 0; height: 100%; border-radius: 12px; background: linear-gradient(90deg, #ff8fb1, #ffd447, #6cc66c, #4d9be6); transition: width 0.2s; }
-#warm { position: fixed; left: -9999px; top: 0; width: 1px; height: 1px; overflow: hidden; }
-#warm img { position: static; }
 
 #rotate { display: none; }
 @media (orientation: portrait) and (max-width: 820px) {

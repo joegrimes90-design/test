@@ -163,6 +163,7 @@ AT.cartoons = {
       // brushing
       await E.fadeTo(1, 0.3);
       const m = T.buildMouth();
+      await AT.art.fit(m.view.el);
       await AT.imagesReady(m.view.el, 3000);
       await E.fadeTo(0, 0.3);
       AT.audio.music('brush');
@@ -313,11 +314,13 @@ AT.recordCartoon = async (name) => {
   const loading = document.getElementById('loading');
   if (loading) loading.remove();
   const ctx = cartoon.build();
+  await AT.art.fit(E.stage);
   await AT.imagesReady(E.stage, 15000);
   E.fade.style.opacity = 0;
   const rec = {
     ready: true, done: false, duration: 0,
-    step: (dt) => E.step(dt),
+    // sprite bitmaps are painted between frames, never while the clock moves
+    async step(dt) { await AT.art.idle(); await E.step(dt); await AT.art.idle(); },
     async renderAudio() { return AT.audio.renderOffline(AT.audio.rec.events, rec.duration || E.time); },
     events: AT.audio.rec.events,
   };

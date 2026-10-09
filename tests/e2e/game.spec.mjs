@@ -90,7 +90,7 @@ test('sound toggle persists across reloads', async ({ page }) => {
   await tapElement(page, '#btn-sound');
   const after = await page.evaluate(() => ({
     muted: AT.audio.muted, stored: localStorage.getItem('atticus-muted'),
-    icon: document.querySelector('#btn-sound img').src === AT.art.url('ui_mute'),
+    icon: AT.art.shows(document.querySelector('#btn-sound img')) === 'ui_mute',
   }));
   expect(after).toEqual({ muted: true, stored: '1', icon: true });
   await step(page, 1);

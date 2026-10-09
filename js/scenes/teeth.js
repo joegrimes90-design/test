@@ -176,6 +176,7 @@ AT.scenes.teeth = {
     const m = this.buildMouth();
     const { view, teeth, brush } = m;
     const scrubAt = m.scrubAt;
+    await AT.art.fit(view.el);
     await AT.imagesReady(view.el, 1500);
     await E.fadeTo(0, 0.3);
     AT.cast.A && AT.cast.A.setFace({ mouth: 'ahh' });
