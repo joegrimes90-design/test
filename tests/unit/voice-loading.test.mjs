@@ -33,12 +33,13 @@ class FakeAudioContext {
   }
 }
 
-function boot() {
+function boot(extra = {}) {
   const spoken = [];
   const timers = [];
   const listeners = {};
   const game = loadGame({
     globals: {
+      ...extra,
       addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); },
       AudioContext: FakeAudioContext,
       speechSynthesis: { speak: (u) => spoken.push(u.text), cancel() {} },
@@ -152,4 +153,31 @@ test('scenes decode their first lines ahead, and decoded audio stays under 10 MB
   assert.ok(st.voiceBytes <= 8e6);
   assert.deepEqual(spoken, []);
   assert.ok(st.played > 200, `${st.played} lines played`);
+});
+
+test('?record mode without js/voice-data.js: the cartoon voices finish loading, with a console error naming the file', async () => {
+  const errors = [];
+  const { AT, game, fire } = boot({ console: { ...console, error: (...a) => errors.push(a.join(' ')) } });
+  let done = false;
+  const p = AT.audio.loadCartoonVoices().then(() => { done = true; });
+  const script = game.document.body.children.find((c) => c.src === 'js/voice-cartoons.js');
+  assert.ok(script, 'js/voice-cartoons.js requested');
+  script.onload();
+  await settle();
+  assert.equal(done, false, 'waits while js/voice-data.js may still arrive');
+  fire('load'); // the page finished loading, and js/voice-data.js never ran
+  await p;
+  assert.equal(done, true, 'recording can go on (it used to wait for ever)');
+  assert.match(errors.join('\n'), /js\/voice-data\.js is missing/);
+});
+
+test('?record mode with the narration audio: the cartoon voices load without errors', async () => {
+  const errors = [];
+  const { AT, game, loadAudio, fire } = boot({ console: { ...console, error: (...a) => errors.push(a.join(' ')) } });
+  const p = AT.audio.loadCartoonVoices();
+  game.document.body.children.find((c) => c.src === 'js/voice-cartoons.js').onload();
+  loadAudio();
+  fire('load');
+  await p;
+  assert.deepEqual(errors, []);
 });

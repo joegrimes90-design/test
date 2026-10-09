@@ -38,9 +38,15 @@ const browser = await chromium.launch();
 for (const name of names) {
   const t0 = Date.now();
   const page = await browser.newPage({ viewport: { width: W, height: H } });
-  page.on('pageerror', (e) => console.error('[pageerror]', e.message));
+  // an error while the cartoon loads (e.g. js/voice-data.js missing: no narration) stops at once, with the reason
+  let loadError;
+  const failed = new Promise((resolve, reject) => { loadError = reject; });
+  failed.catch(() => {});
+  page.on('pageerror', (e) => { console.error('[pageerror]', e.message); loadError(new Error(`${name}: ${e.message}`)); });
+  page.on('console', (m) => { if (m.type() === 'error') { console.error('[console.error]', m.text()); loadError(new Error(`${name}: ${m.text()}`)); } });
   await page.goto(`${base}/index.html?record=${name}`);
-  await page.waitForFunction(() => window.__rec && window.__rec.ready, null, { timeout: 60000 });
+  await Promise.race([page.waitForFunction(() => window.__rec && window.__rec.ready, null, { timeout: 60000 }), failed]);
+  loadError = () => {}; // (from here on errors are only logged)
   await page.evaluate(() => document.fonts.ready);
 
   const silent = path.join(outDir, `.${name}-frames.mp4`);

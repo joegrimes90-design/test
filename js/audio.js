@@ -366,7 +366,10 @@ AT.audio = (() => {
     voiceSettle();
     prefetchScene();
   };
-  // ?record mode: the cartoons also say lines that normal play never does.
+  // ?record mode: the cartoons also say lines that normal play never does. Resolves once both
+  // narration files have loaded or failed to: a missing js/voice-data.js (whose audio would never
+  // arrive) is reported as a console error, so tools/render-videos.mjs stops with the reason at
+  // once, and the cartoon is recorded without those lines' audio.
   function loadCartoonVoices() {
     const loaded = new Promise((resolve) => {
       const s = document.createElement('script');
@@ -375,7 +378,9 @@ AT.audio = (() => {
       s.onerror = () => { console.error('could not load js/voice-cartoons.js'); resolve(); };
       document.body.appendChild(s);
     });
-    return Promise.all([loaded, AT.voiceReady]);
+    return Promise.all([loaded, voiceSettled]).then(() => {
+      if (voiceMissing) console.error('narration audio js/voice-data.js is missing: the cartoon would be recorded without it');
+    });
   }
 
   const b64ToBuf = (b64) => {
