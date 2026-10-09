@@ -60,14 +60,19 @@ test('tools/build-artifact.mjs bundles everything into one HTML fragment', () =>
     assert.doesNotMatch(bundle, /<script[^>]+src=/, 'no external scripts');
     assert.doesNotMatch(bundle, /<link[^>]+stylesheet/, 'no external stylesheets');
     assert.match(bundle, /AT\.boot\(\)/);
-    // every script made it in, in order
+    // every script made it in, in document order (src and inline), so AT.boot()
+    // runs before the narration audio has even arrived
+    const marker = (f) => read(f).trim().split('\n')[0].slice(0, 80);
+    const tags = [...html.matchAll(/<script(?: src="([^"]+)")?>([^<]*)<\/script>/g)].map(([, src, inline]) => ({ name: src || inline, marker: src ? marker(src) : inline }));
+    assert.deepEqual(tags.filter((t) => t.name.endsWith('.js')).map((t) => t.name), jsFiles);
     let at = -1;
-    for (const f of jsFiles) {
-      const marker = read(f).trim().split('\n')[0].slice(0, 80);
-      const i = bundle.indexOf(marker, at + 1);
-      assert.ok(i > at, `${f} missing or out of order in the bundle`);
+    for (const t of tags) {
+      const i = bundle.indexOf(t.marker, at + 1);
+      assert.ok(i > at, `${t.name} missing or out of order in the bundle`);
       at = i;
     }
+    assert.ok(bundle.indexOf('<script>AT.boot();</script>') < bundle.indexOf(marker('js/voice-data.js')), 'AT.boot() before the voice audio');
+    assert.equal(bundle.indexOf(marker('js/voice-cartoons.js')), -1, 'cartoon-only narration is not bundled');
   } finally {
     fs.rmSync(out, { recursive: true, force: true });
   }

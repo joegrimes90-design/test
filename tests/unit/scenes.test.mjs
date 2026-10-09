@@ -73,5 +73,7 @@ test('index.html loads every script in a working order', () => {
   assert.ok(at('js/engine.js') < at('js/characters.js') && at('js/engine.js') < at('js/game.js'));
   assert.ok(at('js/game.js') < at('js/scenes/title.js'), 'game.js before the scenes');
   for (const s of SCENES) assert.ok(at(`js/scenes/${s}.js`) > 0, `scene ${s} loaded`);
-  assert.match(read('index.html'), /<script>AT\.boot\(\);<\/script>\s*<\/body>/, 'AT.boot() runs last');
+  assert.ok(at('js/voice-index.js') > at('js/audio.js') && at('js/voice-index.js') < at('js/game.js'), 'narration index (text, durations) loads with the game');
+  // the narration audio (1.7 MB) loads after AT.boot(), so the title never waits for it
+  assert.match(read('index.html'), /<script>AT\.boot\(\);<\/script>\s*<script src="js\/voice-data\.js"><\/script>\s*<\/body>/, 'AT.boot() runs after every game script; only the narration audio follows it');
 });

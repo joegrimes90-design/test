@@ -55,6 +55,7 @@
     if (going) return;
     going = true;
     mark(`at:go:${name}`);
+    AT.audio.prefetch(name);
     if (AT.sceneName) await E.fadeTo(1, 0.35);
     E.newToken();
     AT.audio.stopVoice();
@@ -250,7 +251,7 @@
     if (record) {
       document.body.classList.add('recording');
       AT.audio.rec.on = true;
-      return AT.recordCartoon(record);
+      return AT.audio.loadCartoonVoices().then(() => AT.recordCartoon(record));
     }
     AT.buildHud();
     // Browsers only let sound start from these events (on touch screens pointerdown doesn't count).

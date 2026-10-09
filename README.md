@@ -28,7 +28,7 @@ Plain HTML, CSS and JavaScript with no libraries.
 
 - **Art** (`js/art-*.js`) is drawn in code as SVG and painted with filters that imitate watercolour: wobbly edges, uneven pigment, darker rims where paint pools, and loose ink lines over a paper texture.
 - **Characters** (`js/characters.js`) are puppets made of painted parts that bend at the joints, with swappable faces.
-- **Sound** (`js/audio.js`): all sound effects and music are synthesised with the Web Audio API. Narration is pre-recorded neural speech stored in `js/voice-data.js`.
+- **Sound** (`js/audio.js`): all sound effects and music are synthesised with the Web Audio API, and pause while the page is hidden. Narration is pre-recorded neural speech in three generated files: `js/voice-index.js` (every line's text, speaker and duration, and the lines each scene says) loads with the game; the audio, `js/voice-data.js` (1.7 MB), loads after the game has started, so the title never waits for it; `js/voice-cartoons.js` holds the lines only the cartoons say and is loaded only when recording them. Each scene decodes its lines as it starts, keeping at most about 8 MB of decoded audio.
 - **Engine** (`js/engine.js`): every animation runs on one game clock, so the cartoons can be recorded frame by frame.
 
 ### Tools (`tools/`)
@@ -42,12 +42,15 @@ cd tools
 # Voices: Kokoro text-to-speech (see the header of gen_voice.py for the model download)
 python3 -m venv .venv && .venv/bin/pip install kokoro-onnx soundfile numpy
 .venv/bin/python gen_voice.py kokoro-v1.0.onnx voices-v1.0.bin
+# After a scene starts (or stops) saying an existing line: re-sort the clips, nothing is re-spoken
+node split-voice.mjs
 
 # Cartoon videos: records js/cartoons.js to videos/*.mp4
 node render-videos.mjs             # or: node render-videos.mjs potty
 
 # Development helpers
 node playtest.mjs potty out/ 90 4  # auto-plays a scene and saves screenshots
+node perf.mjs --cpu 1 --net 1600,150 --page /dist/atticus.html   # the artifact bundle on a slow connection
 ```
 
 Developer URL options: `index.html?scene=teeth` jumps to a scene, `&speed=3` runs the clock faster, `&manual=1` stops the clock for tests (see Testing).
@@ -64,8 +67,8 @@ npm run test:update-baselines     # re-record the baselines after an intended vi
 npm run perf                      # load and frame-rate budgets (not part of npm test)
 ```
 
-- **Unit** (`tests/unit/`, `node --test`): every spoken line exists in `tools/voice-lines.json` and `js/voice-data.js` with the same text; every sprite the code uses is defined and renders to well-formed SVG; scenes, cartoons and videos are wired up; every sound effect and music track renders (through a fake `OfflineAudioContext`); the clock and the test hook work; the game still runs from `file://` (no modules, no `fetch`) and still bundles with `tools/build-artifact.mjs`.
-- **End-to-end** (`tests/e2e/`): boots with no console errors; the title leads to the hub; an auto-player (the logic of `tools/playtest.mjs`) plays potty, teeth and baby to the end and earns each sticker; the last sticker starts the party; balloons pop; the TV plays a cartoon (WebM where H.264 is missing); Home, the sound toggle and "New day" work.
+- **Unit** (`tests/unit/`, `node --test`): every spoken line exists in `tools/voice-lines.json` and the narration files with the same text, each scene's lines are in its list with their audio in `js/voice-data.js`, and every clip is byte-for-byte the audio of the last commit; narration that arrives late waits for its audio instead of using the browser's robot voice, and decoded audio stays within its budget; every sprite the code uses is defined and renders to well-formed SVG; scenes, cartoons and videos are wired up; every sound effect and music track renders (through a fake `OfflineAudioContext`); the clock and the test hook work; the game still runs from `file://` (no modules, no `fetch`) and still bundles with `tools/build-artifact.mjs`.
+- **End-to-end** (`tests/e2e/`): boots with no console errors; the title leads to the hub; an auto-player (the logic of `tools/playtest.mjs`) plays potty, teeth and baby to the end and earns each sticker; the last sticker starts the party; balloons pop; the TV plays a cartoon (WebM where H.264 is missing); Home, the sound toggle and "New day" work; with real audio, narration requested before its audio file has arrived waits for it and never uses the speech synthesiser (title, hub, a whole potty round), and sound pauses while the page is hidden.
 - **Visual** (`tests/visual/`, 1280x720 at deviceScaleFactor 2): every sprite in a gallery (`gallery.html`, at natural size and at its largest in-game scale), plus frames of every scene and of the hand-washing and mouth close-ups.
 
 **Deterministic mode.** Tests open `index.html?manual=1`: the clock only moves when the test calls `await __test.step(seconds, fps)`, and `Math.random` is seeded, so every frame is reproducible (two runs give bit-identical screenshots). While fast-forwarding, the tests hide the stage, because painting is the slow part. They show it again before every tap and screenshot.

@@ -1,24 +1,43 @@
 // Load-performance benchmark.
 //   node tools/perf.mjs [--cpu 4] [--runs 3] [--json out.json] [--scenes]
+//                       [--page /dist/atticus.html] [--net 1600,150]
 // Opens index.html in headless Chromium with the CPU slowed down (like a
 // tablet), and reports how long it takes to reach each milestone.
+// --net kbps,rtt emulates a network (download kbit/s, round trip ms) and serves
+// files gzipped, like a web host. --page /dist/atticus.html measures the one-file
+// artifact bundle (rebuilt first with tools/build-artifact.mjs).
 import { chromium } from 'playwright';
+import { execFileSync } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const arg = (k, d) => { const i = process.argv.indexOf('--' + k); return i > 0 ? process.argv[i + 1] : d; };
 const flag = (k) => process.argv.includes('--' + k);
 const CPU = +arg('cpu', 4), RUNS = +arg('runs', 3), OUT = arg('json', null), PAGE = arg('page', '/index.html');
+const NET = arg('net', null) && arg('net').split(',').map(Number); // [kbps, rttMs]
+if (PAGE === '/dist/atticus.html') execFileSync(process.execPath, [path.join(root, 'tools/build-artifact.mjs')], { stdio: 'inherit' });
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.mp4': 'video/mp4', '.webm': 'video/webm', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.png': 'image/png', '.json': 'application/json' };
 
 const server = http.createServer((req, res) => {
   const p = path.join(root, decodeURIComponent(req.url.split('?')[0]));
   if (!p.startsWith(root) || !fs.existsSync(p) || fs.statSync(p).isDirectory()) { res.writeHead(404); return res.end(); }
-  res.writeHead(200, { 'content-type': types[path.extname(p)] || 'application/octet-stream', 'cache-control': 'no-store' });
+  const headers = { 'content-type': types[path.extname(p)] || 'application/octet-stream', 'cache-control': 'no-store' };
+  if (NET && /^(text|application\/json)/.test(headers['content-type']) && /gzip/.test(req.headers['accept-encoding'] || '')) {
+    res.writeHead(200, { ...headers, 'content-encoding': 'gzip' });
+    return res.end(gzipped(p));
+  }
+  res.writeHead(200, headers);
   fs.createReadStream(p).pipe(res);
 });
+const gzCache = new Map();
+function gzipped(p) {
+  const key = p + ':' + fs.statSync(p).mtimeMs;
+  if (!gzCache.has(key)) gzCache.set(key, zlib.gzipSync(fs.readFileSync(p)));
+  return gzCache.get(key);
+}
 await new Promise((r) => server.listen(0, r));
 const base = `http://localhost:${server.address().port}`;
 
@@ -31,6 +50,10 @@ async function oneRun() {
   const cdp = await ctx.newCDPSession(page);
   await cdp.send('Emulation.setCPUThrottlingRate', { rate: CPU });
   await cdp.send('Performance.enable');
+  if (NET) {
+    await cdp.send('Network.enable');
+    await cdp.send('Network.emulateNetworkConditions', { offline: false, latency: NET[1], downloadThroughput: (NET[0] * 1000) / 8, uploadThroughput: (NET[0] * 1000) / 8 });
+  }
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   await page.addInitScript(() => {
@@ -79,6 +102,8 @@ async function oneRun() {
       r.scenes[sc] = t;
     }
   }
+  // when the narration audio (js/voice-data.js, loaded after boot) arrived
+  r.voiceAudio = await page.evaluate(() => { const e = performance.getEntriesByName('at:voice')[0]; return e ? Math.round(e.startTime) : null; });
   r.errors = errors.length;
   await ctx.close();
   return r;
@@ -86,8 +111,8 @@ async function oneRun() {
 
 const runs = [];
 for (let i = 0; i < RUNS; i++) { const r = await oneRun(); runs.push(r); console.error(`run ${i + 1}: title shown at ${r.titleShown} ms`); }
-const keys = ['fcp', 'domContentLoaded', 'boot', 'warm', 'titleBuilt', 'titleShown', 'titleFrame', 'longTasks', 'longTaskMs', 'maxLongTask', 'scriptSec', 'taskSec', 'heapMB', 'errors'];
-const summary = { cpuThrottle: CPU, runs: RUNS, page: PAGE };
+const keys = ['fcp', 'domContentLoaded', 'boot', 'warm', 'titleBuilt', 'titleShown', 'titleFrame', 'longTasks', 'longTaskMs', 'maxLongTask', 'scriptSec', 'taskSec', 'heapMB', 'voiceAudio', 'errors'];
+const summary = { cpuThrottle: CPU, runs: RUNS, page: PAGE, ...(NET ? { net: { kbps: NET[0], rttMs: NET[1] } } : {}) };
 for (const k of keys) summary[k] = median(runs.map((r) => r[k]));
 summary.frameP50 = median(runs.map((r) => r.frames.p50));
 summary.frameP95 = median(runs.map((r) => r.frames.p95));

@@ -75,6 +75,8 @@ AT.engine = (() => {
     last = now;
     tick(dt * E.speed);
   }
+  // back from a hidden page: carry on with a normal frame, not one long step
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) last = 0; });
   // Deterministic stepping for the video recorder.
   E.step = async (dt) => {
     tick(dt);
