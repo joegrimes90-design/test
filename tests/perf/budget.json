@@ -1,0 +1,11 @@
+{
+  "_comment": "Budgets for npm run perf (milliseconds; headless Chromium, 1280x720 at deviceScaleFactor 2). titleShown = navigation start to the title fully faded in. frameP95 = 95th percentile frame interval on the animated title (16.7 = 60 fps, 33 = 30 fps). These are the optimisation targets: 'generous' versus a smooth 60 fps, but far below today's numbers (see baseline.json), so they fail until rendering is fixed.",
+  "noThrottle": {
+    "titleShown": 2500,
+    "frameP95": 50
+  },
+  "cpu4": {
+    "titleShown": 4000,
+    "frameP95": 50
+  }
+}

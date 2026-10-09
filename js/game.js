@@ -241,7 +241,8 @@
     mark('at:boot');
     const params = new URLSearchParams(location.search);
     const record = params.get('record');
-    E.init({ record: !!record });
+    // ?manual=1 is the deterministic test mode (see installTestHook in engine.js)
+    E.init({ record: !!record, manual: params.get('manual') === '1' });
     // developer options: ?scene=potty jumps straight to a scene, ?speed=3 runs the clock faster
     E.speed = Math.max(0.25, Math.min(8, parseFloat(params.get('speed')) || 1));
     const startScene = params.get('scene');

@@ -70,7 +70,7 @@ AT.engine = (() => {
 
   let last = 0;
   function frame(now) {
-    if (!E.recording) requestAnimationFrame(frame);
+    if (!E.recording && !E.manual) requestAnimationFrame(frame);
     const dt = last ? Math.min(0.05, (now - last) / 1000) : 1 / 60;
     last = now;
     tick(dt * E.speed);
@@ -202,6 +202,7 @@ AT.engine = (() => {
   // ---------- stage + scaling ----------
   E.init = (opts = {}) => {
     E.recording = !!opts.record;
+    E.manual = !!opts.manual;
     E.stage = document.getElementById('stage');
     E.world = document.getElementById('world');
     E.fxScreen = document.getElementById('fxs');
@@ -217,8 +218,28 @@ AT.engine = (() => {
     window.addEventListener('resize', fit);
     fit();
     E.camera.set({ x: 0, y: 0, zoom: 1 });
-    if (!E.recording) requestAnimationFrame(frame);
+    if (E.manual) installTestHook();
+    else if (!E.recording) requestAnimationFrame(frame);
   };
+
+  // ---------- test hook (?manual=1, used by tests/ only) ----------
+  // The clock stands still until a test calls `await __test.step(seconds, fps)`,
+  // which advances it in fixed 1/fps steps through E.step(). Before each step it
+  // waits for pending image decodes, so slow decoding never shifts the timeline.
+  // With Math.random seeded by the test, every frame is reproducible.
+  function installTestHook() {
+    const ch = new MessageChannel();
+    const yieldTask = () => new Promise((r) => { ch.port1.onmessage = r; ch.port2.postMessage(0); });
+    const settle = () => Promise.all([...E.stage.querySelectorAll('img')].map((im) => im.decode().catch(() => {}))).then(yieldTask);
+    window.__test = {
+      async step(sec = 0, fps = 60) {
+        const n = Math.max(1, Math.round(sec * fps));
+        for (let i = 0; i < n; i++) { await settle(); await E.step(sec / n); }
+        return E.time;
+      },
+      get time() { return E.time; },
+    };
+  }
 
   // pointer -> stage coordinates
   E.toStage = (ev) => {

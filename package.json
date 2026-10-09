@@ -1,0 +1,23 @@
+{
+  "name": "atticus-big-day",
+  "private": true,
+  "type": "module",
+  "description": "Atticus's Big Day: a watercolour game for toddlers. Dev tools and test suites (the game itself needs no install).",
+  "scripts": {
+    "test": "npm run test:unit && playwright test",
+    "test:unit": "node --test \"tests/unit/**/*.test.mjs\"",
+    "test:e2e": "playwright test --project=e2e",
+    "test:visual": "playwright test --project=visual",
+    "test:update-baselines": "playwright test --project=visual --update-snapshots=all",
+    "perf": "node tests/perf/check.mjs",
+    "serve": "node tests/server.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "playwright": "1.56.1",
+    "pngjs": "7.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "recorded": "2026-10-09T04:39:00.411Z",
+  "runs": 3,
+  "machine": "4 CPUs, linux",
+  "note": "headless Chromium, 1280x720 at deviceScaleFactor 2 (tools/perf.mjs)",
+  "noThrottle": {
+    "titleShown": 4002,
+    "frameP50": 366.7,
+    "frameP95": 400,
+    "warm": 426,
+    "fcp": 64,
+    "longTaskMs": 4285,
+    "maxLongTask": 501,
+    "heapMB": 10,
+    "errors": 0
+  },
+  "cpu4": {
+    "titleShown": 6501,
+    "frameP50": 550,
+    "frameP95": 616.6,
+    "warm": 1700,
+    "fcp": 128,
+    "longTaskMs": 6410,
+    "maxLongTask": 742,
+    "heapMB": 10,
+    "errors": 0
+  }
+}

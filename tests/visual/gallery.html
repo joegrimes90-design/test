@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sprite gallery</title>
+<!-- The game's own stylesheet, so .node/.spr rendering matches the game exactly. -->
+<link rel="stylesheet" href="../../css/style.css">
+<style>
+  html, body { overflow: visible; height: auto; background: #fbf4e6; }
+  #page { position: relative; overflow: hidden; background: #fbf4e6; }
+</style>
+</head>
+<body>
+<div id="page"></div>
+<!-- Art engine + engine (Node) + game glue (AT.imagesReady), exactly as the game loads them. -->
+<script src="../../js/art-core.js"></script>
+<script src="../../js/art-characters.js"></script>
+<script src="../../js/art-props.js"></script>
+<script src="../../js/art-scenes.js"></script>
+<script src="../../js/engine.js"></script>
+<script src="../../js/game.js"></script>
+<script type="module">
+  // gallery.html?page=sprites-01 renders that page of tests/visual/gallery-layout.mjs
+  import { galleryPages } from './gallery-layout.mjs';
+  const pages = galleryPages(AT.art.list(), AT.art.box);
+  const name = new URLSearchParams(location.search).get('page') || pages[0].name;
+  const page = pages.find((p) => p.name === name);
+  const root = document.getElementById('page');
+  root.style.width = page.width + 'px';
+  root.style.height = page.height + 'px';
+  for (const c of page.cells) {
+    const b = AT.art.box(c.id);
+    // a game Node: a 0x0 div moved with translate()/scale(), holding the sprite <img>
+    AT.engine.node(root, { sprite: c.id }).set({ x: c.x - b[0] * c.s, y: c.y - b[1] * c.s, s: c.s });
+  }
+  await AT.imagesReady(document.body, 60000);
+  await document.fonts.ready;
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  window.__gallery = { name: page.name, width: page.width, height: page.height, cells: page.cells, pages: pages.map((p) => p.name) };
+</script>
+</body>
+</html>

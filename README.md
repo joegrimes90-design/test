@@ -36,7 +36,8 @@ Plain HTML, CSS and JavaScript with no libraries.
 Only needed to change voices or videos. Needs Node 18+, Python 3 and ffmpeg.
 
 ```sh
-cd tools && npm install            # Playwright, for rendering
+npm install                        # once, at the repo root: Playwright (for rendering and tests)
+cd tools
 
 # Voices: Kokoro text-to-speech (see the header of gen_voice.py for the model download)
 python3 -m venv .venv && .venv/bin/pip install kokoro-onnx soundfile numpy
@@ -49,7 +50,41 @@ node render-videos.mjs             # or: node render-videos.mjs potty
 node playtest.mjs potty out/ 90 4  # auto-plays a scene and saves screenshots
 ```
 
-Developer URL options: `index.html?scene=teeth` jumps to a scene, `&speed=3` runs the clock faster.
+Developer URL options: `index.html?scene=teeth` jumps to a scene, `&speed=3` runs the clock faster, `&manual=1` stops the clock for tests (see Testing).
+
+## Testing
+
+```sh
+npm install                       # once: Playwright 1.56.1 + pngjs (needs its Chromium: npx playwright install chromium)
+npm test                          # unit + end-to-end + visual, about 3 minutes
+npm run test:unit                 # static checks in Node, about 1 second
+npm run test:e2e                  # plays the game in headless Chromium
+npm run test:visual               # screenshots compared with tests/visual/baselines/
+npm run test:update-baselines     # re-record the baselines after an intended visual change
+npm run perf                      # load and frame-rate budgets (not part of npm test)
+```
+
+- **Unit** (`tests/unit/`, `node --test`): every spoken line exists in `tools/voice-lines.json` and `js/voice-data.js` with the same text; every sprite the code uses is defined and renders to well-formed SVG; scenes, cartoons and videos are wired up; every sound effect and music track renders (through a fake `OfflineAudioContext`); the clock and the test hook work; the game still runs from `file://` (no modules, no `fetch`) and still bundles with `tools/build-artifact.mjs`.
+- **End-to-end** (`tests/e2e/`): boots with no console errors; the title leads to the hub; an auto-player (the logic of `tools/playtest.mjs`) plays potty, teeth and baby to the end and earns each sticker; the last sticker starts the party; balloons pop; the TV plays a cartoon (WebM where H.264 is missing); Home, the sound toggle and "New day" work.
+- **Visual** (`tests/visual/`, 1280x720 at deviceScaleFactor 2): every sprite in a gallery (`gallery.html`, at natural size and at its largest in-game scale), plus frames of every scene and of the hand-washing and mouth close-ups.
+
+**Deterministic mode.** Tests open `index.html?manual=1`: the clock only moves when the test calls `await __test.step(seconds, fps)`, and `Math.random` is seeded, so every frame is reproducible (two runs give bit-identical screenshots). While fast-forwarding, the tests hide the stage, because painting is the slow part. They show it again before every tap and screenshot.
+
+**Visual thresholds** (`tests/visual/thresholds.mjs`). Each screenshot is compared with its baseline using PSNR, SSIM, sharpness (gradient energy, new ÷ baseline) and mean colour shift. These are checked for the whole image, every 256 px tile, and every sprite in the gallery. The limits were set by rendering changes on purpose:
+
+| change | sharpness (image / worst tile) | colour shift | result |
+|---|---|---|---|
+| sprites cached as bitmaps at the displayed resolution, or compositor layers | ≥ 0.91 / ≥ 0.79 | ≤ 0.4 | pass |
+| 1x bitmaps on a 2x screen | 0.82–0.87 / ≤ 0.62 | | fail |
+| 2x bitmaps for a sprite shown at 2.6x (sink close-up) | 0.98 / 0.59 | | fail |
+| 0.5 px blur | ≤ 0.76 / ≤ 0.44 | | fail |
+| brightness +2 %, saturation +10 %, hue +4° | | 2.3–9 levels | fail |
+
+The limits: whole image PSNR ≥ 32 dB, SSIM ≥ 0.97, sharpness 0.89–1.10, shift ≤ 1.5 levels; tiles sharpness ≥ 0.70, shift ≤ 3; sprites sharpness ≥ 0.78. When a test fails, `test-results/<test>/` gets `*-actual.png`, `*-expected.png`, an amplified `*-diff.png` and `*-metrics.json`, naming the worst tiles and sprites. They are also in the HTML report (`npx playwright show-report`).
+
+**Updating baselines.** Run `npm run test:update-baselines` after a change that is *meant* to look different. Look at the new PNGs before committing them. Baselines depend on the browser build and fonts (these come from Playwright 1.56.1's headless Chromium on Linux). On another machine, record them first from unchanged code.
+
+**Performance.** `npm run perf` runs `tools/perf.mjs` without throttling and with 4x CPU throttling. It fails if `titleShown` or `frameP95` exceeds `tests/perf/budget.json`; the other numbers are shown for information. The budgets are the optimisation targets, so today's code fails them: `tests/perf/baseline.json` shows the title fading in after 4.0 s and frames taking 400 ms. Re-record the baseline with `npm run perf -- --update-baseline`. Today it takes about 6 minutes, because every frame is slow.
 
 ## Credits
 
