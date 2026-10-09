@@ -564,7 +564,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   const ON_THREAD_DIFFERS = /rotate\(|skewX|skewY|matrix\(/;
   let asyncReady = null; // Promise<boolean>: off-thread painting is exact here
   let asyncOk = null;    // its answer once known (until then painting goes ahead off the main thread)
-  let inflight = 0, inflightPx = 0, slotWake = null;
+  let inflight = 0, inflightPx = 0, bigInflight = 0, slotWake = null;
   const loadImage = (src) => new Promise((resolve, reject) => {
     const im = new Image();
     // (ahead of the scene's own imgs, whose plain SVG is only a stand-in: Chromium otherwise loads
@@ -636,9 +636,24 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     }, (e) => { if (r) rastering--; done(); throw e; });
   }
   // PNG Blob of an ImageBitmap (the bitmap is handed over: transferred or closed)
-  let encoder; // Worker | null (unavailable) | undefined (not tried yet)
+  // Two workers on a device with four or more cores, so that encoding a background (a fifth of a
+  // second) does not hold up the small bitmaps painted meanwhile; the second starts when needed.
+  let encoder; // the first Worker | null (unavailable) | undefined (not tried yet)
   let encSeq = 0;
   const encWaits = new Map();
+  const encoders = []; // [{w, px}]: px = pixels waiting to be encoded there
+  const ENCODERS = typeof navigator !== 'undefined' && navigator.hardwareConcurrency >= 4 ? 2 : 1;
+  const ENC_SRC = 'onmessage=function(e){var m=e.data,c=new OffscreenCanvas(m.b.width,m.b.height);c.getContext("2d").drawImage(m.b,0,0);m.b.close();' +
+    'c.convertToBlob({type:"image/png"}).then(function(b){postMessage({id:m.id,blob:b})},function(){postMessage({id:m.id,blob:null})})}';
+  function newEncoder() {
+    const w = new Worker(URL.createObjectURL(new Blob([ENC_SRC], { type: 'text/javascript' })));
+    w.onmessage = (ev) => { const r = encWaits.get(ev.data.id); encWaits.delete(ev.data.id); if (r) r(ev.data.blob); };
+    // (any worker failing: canvas.toBlob from then on)
+    w.onerror = (ev) => { if (ev && ev.preventDefault) ev.preventDefault(); encoder = null; encWaits.forEach((r) => r(null)); encWaits.clear(); };
+    const e = { w, px: 0 };
+    encoders.push(e);
+    return e;
+  }
   function encoderWorker() {
     if (encoder !== undefined) return encoder;
     encoder = null;
@@ -646,20 +661,19 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       // (?enc=toblob, and the one-file artifact bundle: its host's Content-Security-Policy may forbid
       // blob: workers, and a refused worker logs a console error; tools/build-artifact.mjs sets AT_BUNDLE)
       if (params.get('enc') === 'toblob' || window.AT_BUNDLE || typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined' || !OffscreenCanvas.prototype.convertToBlob) return null;
-      const src = 'onmessage=function(e){var m=e.data,c=new OffscreenCanvas(m.b.width,m.b.height);c.getContext("2d").drawImage(m.b,0,0);m.b.close();' +
-        'c.convertToBlob({type:"image/png"}).then(function(b){postMessage({id:m.id,blob:b})},function(){postMessage({id:m.id,blob:null})})}';
-      const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
-      w.onmessage = (ev) => { const r = encWaits.get(ev.data.id); encWaits.delete(ev.data.id); if (r) r(ev.data.blob); };
-      w.onerror = (ev) => { if (ev && ev.preventDefault) ev.preventDefault(); encoder = null; encWaits.forEach((r) => r(null)); encWaits.clear(); };
-      encoder = w;
+      encoder = newEncoder().w;
     } catch (e) { encoder = null; }
     return encoder;
   }
   function encodePng(bm) {
-    const w = encoderWorker();
-    if (w) {
-      return new Promise((resolve) => { const id = ++encSeq; encWaits.set(id, resolve); w.postMessage({ id, b: bm }, [bm]); })
-        .then((blob) => blob || Promise.reject(new Error('encode')));
+    if (encoderWorker()) {
+      let enc = encoders[0];
+      for (const e of encoders) if (e.px < enc.px) enc = e;
+      if (enc.px && encoders.length < ENCODERS) { try { enc = newEncoder(); } catch (e) { /* the first one will do */ } }
+      const px = bm.width * bm.height;
+      enc.px += px;
+      return new Promise((resolve) => { const id = ++encSeq; encWaits.set(id, resolve); enc.w.postMessage({ id, b: bm }, [bm]); })
+        .then((blob) => { enc.px -= px; return blob || Promise.reject(new Error('encode')); });
     }
     const cv = document.createElement('canvas');
     cv.width = bm.width; cv.height = bm.height;
@@ -706,16 +720,17 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     return asyncReady;
   }
   const offThread = (id) => !ON_THREAD_DIFFERS.test(sprites[id].text || (sprites[id].text = svgOf(id)));
-  function bakeAsync(id, k, wanted) {
+  function bakeAsync(id, k, wanted, rastered) {
     const sp = sprites[id];
     const w = sp.box[2], h = sp.box[3];
     const cw = Math.ceil(w * k - 1e-6), ch = Math.ceil(h * k - 1e-6);
     if (cw < 1 || ch < 1 || cw * ch > MAX_PX) return Promise.reject(new Error('size')); // (bake() decides)
     const t0 = performance.now();
     return bitmapOf(sp.text, w, h, k, cw, ch, wanted).then((bm) => {
+      if (rastered) rastered();
       if (wanted && !wanted()) { if (bm.close) bm.close(); throw SUPERSEDED; }
       return encodePng(bm);
-    }).then((blob) => {
+    }, (e) => { if (rastered) rastered(); throw e; }).then((blob) => {
       const ms = performance.now() - t0;
       st.asyncJobs++; st.asyncMs += ms;
       return makeEntry(id, k, cw, ch, blob, ms);
@@ -725,8 +740,17 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   const slot = () => new Promise((resolve) => { slotWake = resolve; });
   function startAsync(job, px) {
     inflight++; inflightPx += px;
+    // (a big one counts against BIG_LANES while it is rasterised, not while it is encoded and decoded)
+    let big = px > BIG_PX;
+    if (big) bigInflight++;
+    const rastered = () => {
+      if (!big) return;
+      big = false; bigInflight--;
+      const w = slotWake; slotWake = null;
+      if (w) w();
+    };
     // superseded jobs (nobody wants them any more, e.g. after a resize) stop before painting or encoding
-    bakeAsync(job.id, job.k, () => mode === 'bitmap' && stillWanted(job))
+    bakeAsync(job.id, job.k, () => mode === 'bitmap' && stillWanted(job), rastered)
       // (painted before the boot probe had answered: kept only if it says off-thread painting is exact)
       .then((e) => (asyncOk !== null ? e : asyncCheck().then((ok) => { if (!ok && e) { URL.revokeObjectURL(e.url); e.pre = null; throw new Error('probe'); } return e; })))
       // (decoded now only if an img wants it: a prefetch is decoded when it is shown, as decoding
@@ -746,6 +770,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       })
       .finally(() => {
         inflight--; inflightPx -= px;
+        rastered();
         const w = slotWake; slotWake = null;
         if (w) w();
         checkIdle();
@@ -833,7 +858,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       for (;;) {
         const useAsync = asyncOk !== false && tuning.async && typeof createImageBitmap === 'function';
         if (!queue.length) { if (!inflight && !loadingStored) break; await slot(); continue; }
-        const i = pick();
+        const i = pickLane();
         const job = queue[i];
         // sprites whose scale changes every frame (checkScales: a ratchet shows it magnified until its
         // bitmap arrives; an offer is the step it needs in a few frames) go first, painted here: the
@@ -956,6 +981,21 @@ ${ink('ks', 1.6, 1.6, 0.25)}
       if (j.pri < q.pri || (j.pri === q.pri && j.px > q.px)) b = i;
     }
     return b;
+  }
+  // (but while BIG_LANES big ones are being painted, smaller ones go first: on three worker threads
+  // that keeps one painting the many small bitmaps, whose loading and encoding then overlap the big
+  // rasters instead of all waiting for them at the end)
+  const BIG_LANES = 2;
+  function pickLane() {
+    const b = pick();
+    if (bigInflight < BIG_LANES || queue[b].px <= BIG_PX) return b;
+    let s = -1;
+    for (let i = 0; i < queue.length; i++) {
+      const j = queue[i];
+      if (j.px > BIG_PX) continue;
+      if (s < 0 || j.pri < queue[s].pri || (j.pri === queue[s].pri && j.px > queue[s].px)) s = i;
+    }
+    return s < 0 ? b : s;
   }
   // estimated ms to paint sprite id at k (from the jobs so far)
   function estimate(id, k) {
@@ -1226,11 +1266,16 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     }
     return out;
   }
-  // In idle time while scene `name` is played (null: stop), paint the small bitmaps (estimated at
-  // most SYNC_MS) of the scenes that can follow it (AT_SPRITES.next), one at a time and only while
-  // nothing else is being painted, so the next scene's cover is shorter. Big ones (backgrounds,
-  // the mouth close-up) wait for that scene's cover. Live play only (?manual and recordings wait
-  // for idle() at every step, which this would hold up).
+  // In idle time while scene `name` is played (null: stop), paint bitmaps of the scenes that can
+  // follow it (AT_SPRITES.next), one at a time and only while nothing else is being painted, so the
+  // next scene's cover is shorter: first the big ones that two or more of those scenes share (from
+  // the hub: the bathroom background of potty and teeth, the lounge of tv and party; the heaviest
+  // scenes' first), then the small ones (at most IDLE_PX off the main thread: about a tenth of a
+  // second on a worker thread; on the main thread at most SYNC_MS, within the idle period). Other
+  // big ones (a scene's own background, the mouth close-up) wait for that scene's cover, and no big
+  // one is painted on the main thread. Live play only (?manual and recordings wait for idle() at
+  // every step, which this would hold up).
+  const IDLE_PX = 2.5e5;
   let idleTag = { alive: false };
   const whenIdle = (fn) => (typeof requestIdleCallback === 'function' ? requestIdleCallback(fn, { timeout: 1000 }) : setTimeout(() => fn(null), 50));
   function idlePrefetch(name) {
@@ -1238,24 +1283,36 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     const E = AT.engine;
     if (!name || mode !== 'bitmap' || !E || E.manual || E.recording || params.get('nop2')) return;
     const tag = idleTag = { alive: true, pri: PRI.idle };
-    const seen = new Set(), list = [];
+    const uses = new Map(), small = [];
     const next = (window.AT_SPRITES && window.AT_SPRITES.next[name]) || [];
     for (const sc of next) {
-      for (const [id, k] of sceneList(sc)) {
+      const l = sceneList(sc);
+      let px = 0;
+      for (const [id, k] of l) px += pxOf({ id, k });
+      for (const [id, k] of l) {
         const key = keyOf(id, k);
-        if (seen.has(key) || !(k >= 0.01)) continue;
-        seen.add(key);
-        list.push([id, k, key]);
+        if (!(k >= 0.01)) continue;
+        const u = uses.get(key);
+        if (u) { if (!u.sc.has(sc)) { u.sc.add(sc); u.weight += px; } continue; }
+        uses.set(key, { id, k, sc: new Set([sc]), weight: px });
+        small.push([id, k, key, false]);
       }
     }
+    // (weight: the pixels of the scenes using it)
+    const shared = [...uses.values()].filter((u) => u.sc.size > 1).sort((a, b) => b.weight - a.weight);
+    const list = shared.map((u) => [u.id, u.k, keyOf(u.id, u.k), true]).concat(small);
+    const offMain = (id) => asyncOk === true && tuning.async && typeof createImageBitmap === 'function' && offThread(id);
     const step = (deadline) => {
       if (!tag.alive) return;
       while (list.length) {
-        const [id, k, key] = list[0];
-        if (cache.has(key) || jobs.has(key) || failed.has(key) || estimate(id, k) > SYNC_MS) { list.shift(); continue; }
+        const [id, k, key, big] = list[0];
+        const off = offMain(id);
+        const isSmall = off ? pxOf({ id, k }) <= IDLE_PX : estimate(id, k) <= SYNC_MS;
+        if (cache.has(key) || jobs.has(key) || failed.has(key) || (big ? isSmall || !off : !isSmall)) { list.shift(); continue; }
         // only when nothing else is painting, within the idle period, and well within the memory budget
         if (running || inflight || st.decoded > budget() / 2) break;
-        if (deadline && estimate(id, k) > deadline.timeRemaining() && !deadline.didTimeout) break;
+        // (off the main thread only its loading and encoding are on it)
+        if (!off && deadline && estimate(id, k) > deadline.timeRemaining() && !deadline.didTimeout) break;
         list.shift();
         st.idleJobs++;
         rasterize(id, k, { tag }).then(() => { if (tag.alive) whenIdle(step); });

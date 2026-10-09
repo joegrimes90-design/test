@@ -48,13 +48,14 @@
 
   // ---------- scene manager ----------
   // AT.go(name): fade to paper, build the scene behind the cover (the stage hidden: nothing
-  // under the cover paints, and in live play the clock stands still), paint its sprite bitmaps
-  // and every other bitmap its manifest lists (js/sprite-manifest.js: close-ups, celebrations,
-  // particles, thought bubbles, so nothing is painted during play), then fade in. On a cold
-  // first visit (live play, bitmaps for the first scene neither painted nor stored) the scene
-  // is shown at once, still, with its plain SVG sprites and a progress pill, while the bitmaps
-  // are painted; they go in all at once and then the clock starts (coldPreview). Once a scene
-  // is shown, the small sprites of the scenes that can follow are painted in idle time.
+  // under the cover paints, and in live play the clock stands still until it has faded in),
+  // paint its sprite bitmaps and every other bitmap its manifest lists (js/sprite-manifest.js:
+  // close-ups, celebrations, particles, thought bubbles, so nothing is painted during play), then
+  // fade in. On a cold first visit (live play, bitmaps for the first scene neither painted nor
+  // stored) the scene is shown at once, still, with its plain SVG sprites and a progress pill,
+  // while the bitmaps are painted; they go in all at once and then the clock starts
+  // (coldPreview). Once a scene is shown, bitmaps of the scenes that can follow are painted in
+  // idle time (AT.art.idlePrefetch: backgrounds two of them share, then small sprites).
   let going = false, goSeq = 0, previewing = false;
   AT.sceneName = null;
   const mark = (n) => { try { performance.mark(n); } catch (e) { /* old browsers */ } };
@@ -115,13 +116,14 @@
     const loading = document.getElementById('loading');
     if (loading) loading.remove();
     await AT.imagesReady(E.stage, 10000);
-    E.hold('build', false);
     E.stage.classList.remove('covered');
     mark(`at:built:${name}`);
     // the rest of the manifest (close-ups, celebrations, particles) by the time the scene plays: at
     // the latest while it fades in (nothing is painted once it plays; small ones by then, so the
-    // fade's own frames still get through)
-    await Promise.all([E.fadeTo(0, 0.45), ...manifest.map((m) => m[0])]);
+    // fade's own frames still get through). In live play the scene's clock starts once it has faded
+    // in: a still scene under the fading paper is rastered once, not every frame alongside the painting.
+    const fadeIn = E.fadeTo(0, 0.45).then(() => E.hold('build', false));
+    await Promise.all([fadeIn, ...manifest.map((m) => m[0])]);
     AT.art.lanes(false);
     mark(`at:shown:${name}`);
     if (first) mark(`at:live:${name}`);
