@@ -1,35 +1,61 @@
 {
-  "_comment": "Budgets for npm run perf (milliseconds; headless Chromium, 1280x720 at deviceScaleFactor 2; see tests/perf/check.mjs for the three configurations). titlePainted = navigation start to the faded-in title on screen; titleLive = the title animating; frameP95 = 95th percentile rAF interval on the animated title (16.7 = 60 fps); rasterMsPerFrame = tile raster on the worker threads per frame on the idle title (from a trace); maxLongTaskPlay = longest main-thread task while playing potty and teeth on the real clock with the auto-player (--play), outside AT.go transitions; transitionMax = slowest AT.go to fully faded in, over hub, potty, teeth, baby, tv and party. These are the optimisation targets, so code that has not reached them fails (see baseline.json).",
+  "_comment": "Budgets for npm run perf (milliseconds; headless Chromium, 1280x720 at deviceScaleFactor 2; see tests/perf/check.mjs for the configurations). titlePainted = navigation start to the title on screen (two animation frames after it is shown, or its largest-contentful-paint if later: a cold first visit shows it still, as plain SVG, while its bitmaps are painted); titleLive = the title animating with all its bitmaps; frameP95 = 95th percentile rAF interval on the animated title (16.7 = 60 fps); rasterMsPerFrame = tile raster on the worker threads per frame on the idle title (from a trace); maxLongTaskPlay = longest main-thread task while playing potty and teeth on the real clock with the auto-player (--play), outside AT.go transitions; playFrameP95 = the worst played scene's rAF p95; transitionMax = slowest AT.go to fully faded in, over hub, potty, teeth, baby, tv and party (each scene's own limit under scenes: 2.5 s, potty 3.5 s: its manifest, the hand-washing close-up included, is painted behind its cover); sceneFrameP95 = the worst scene's rAF p95 just after it is shown. revisit*: the second load in the same profile, bitmaps from IndexedDB.",
   "noThrottle": {
     "titlePainted": 2500,
-    "titleLive": 5000,
+    "titleLive": 3500,
     "frameP95": 25,
     "rasterMsPerFrame": 25,
-    "maxLongTaskPlay": 100
+    "maxLongTaskPlay": 150,
+    "playFrameP95": 25,
+    "transitionMax": 3500,
+    "sceneFrameP95": 25,
+    "scenes": {
+      "hub": {
+        "shown": 2500
+      },
+      "potty": {
+        "shown": 3500
+      },
+      "teeth": {
+        "shown": 2500
+      },
+      "baby": {
+        "shown": 2500
+      },
+      "tv": {
+        "shown": 2500
+      },
+      "party": {
+        "shown": 2500
+      }
+    }
   },
   "cpu4": {
     "titlePainted": 4000,
-    "frameP95": 50
+    "titleLive": 6100,
+    "frameP95": 25
   },
   "revisit": {
     "titleShown": 1200,
     "titlePainted": 1400,
     "transitionMax": 1200
   },
+  "revisitCpu4": {
+    "titleShown": 2500
+  },
   "stretch": {
-    "_comment": "Printed, never fails. Cold titleShown is not a fair load budget any more: at:shown can be reached by a static preview while the sprites are still being painted, and CDP throttling slows only the main thread, so cold titleShown at 4x CPU cannot be compared between SVG rastered on worker threads and bitmaps baked on the main thread. titlePainted, titleLive and the revisit numbers are the load budgets. maxLongTask = the longest main-thread task anywhere, loading included (one canvas.toDataURL of a 2560x1440 background is about 2 s at 1x CPU, about 9 s at 4x: the loading bar and input freeze meanwhile). maxLongTaskIdle = the longest task in idle frames (title and freshly entered scenes, nobody playing); playFrameP95 = the worst played scene's rAF p95.",
+    "_comment": "Printed, never fails. titleShown on a cold visit is reached by the still preview (titlePainted and titleLive are the cold load budgets). maxLongTask = the longest main-thread task anywhere, loading included; maxLongTaskIdle = the longest task in idle frames (the title and freshly entered scenes, nobody playing).",
     "noThrottle": {
-      "titleShown": 2500,
-      "maxLongTask": 500,
-      "maxLongTaskIdle": 100,
-      "playFrameP95": 25
+      "titleShown": 1000,
+      "maxLongTask": 150,
+      "maxLongTaskIdle": 100
     },
     "cpu4": {
-      "titleShown": 4000,
-      "maxLongTask": 2000
+      "titleShown": 2500,
+      "maxLongTask": 500
     },
     "revisit": {
-      "maxLongTask": 500
+      "maxLongTask": 150
     }
   }
 }

@@ -8,7 +8,10 @@
 //               and teeth played on the real clock: long tasks and frames while playing)
 //   cpu4        4x CPU throttle, like a tablet
 //   revisit     no throttle, a persistent profile loaded twice (--revisit): the second
-//               load (revisit.*) is what a returning player sees
+//               load (revisit.*) is what a returning player sees (sprite bitmaps from IndexedDB)
+//   revisitCpu4 the same at 4x CPU throttle
+// A budget block may hold `scenes: {hub: {shown: 2500}, ...}`: per-scene limits on the
+// --scenes phases (ms after AT.go).
 // Not part of `npm test`: timings are noisy and it takes several minutes.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -30,6 +33,7 @@ const ALL = {
   cpu4: [['--cpu', '4'], null],
   // frames are measured by the other two; here only load and transition times matter
   revisit: [['--cpu', '1', '--revisit', '--scenes', '--title-frames', '0', '--scene-frames', '0'], 'revisit'],
+  revisitCpu4: [['--cpu', '4', '--revisit', '--title-frames', '0'], 'revisit'],
 };
 const only = arg('only', null);
 const CONFIGS = Object.fromEntries(Object.entries(ALL).filter(([n]) => !only || only.split(',').includes(n)));
@@ -47,8 +51,9 @@ for (const [name, [args, key]] of Object.entries(CONFIGS)) {
   console.log(`  (${Math.round((Date.now() - t0) / 1000)} s)`);
 }
 
-const METRICS = ['titleShown', 'titlePainted', 'titleLive', 'frameP50', 'frameP95', 'rasterMsPerFrame', 'maxLongTaskPlay',
-  'playFrameP95', 'maxLongTaskIdle', 'transitionMax', 'sceneFrameP95', 'warm', 'voiceAudio', 'fcp', 'longTaskMs', 'maxLongTask', 'heapMB', 'errors'];
+const METRICS = ['titleShown', 'titlePainted', 'titleLcp', 'titleLive', 'frameP50', 'frameP95', 'rasterMsPerFrame', 'maxLongTaskPlay',
+  'playFrameP95', 'maxLongTaskIdle', 'transitionMax', 'sceneFrameP95', 'warm', 'voiceAudio', 'fcp', 'longTaskMs', 'maxLongTask',
+  'bitmapsPainted', 'paintedInPlay', 'bitmapsStored', 'heapMB', 'errors'];
 const fails = [];
 const fmt = (v) => (v == null ? '-' : String(v));
 for (const name of Object.keys(CONFIGS)) {
@@ -71,7 +76,13 @@ for (const name of Object.keys(CONFIGS)) {
   if (m.scenes) {
     const cols = ['faded', 'dom', 'raster', 'built', 'shown', 'painted', 'frameP50', 'frameP95'];
     console.log(`  per scene (ms after AT.go):\n    ${'scene'.padEnd(8)}${cols.map((c) => c.padStart(9)).join('')}`);
-    for (const [sc, v] of Object.entries(m.scenes)) console.log(`    ${sc.padEnd(8)}${cols.map((c) => fmt(v[c]).padStart(9)).join('')}`);
+    for (const [sc, v] of Object.entries(m.scenes)) {
+      const lims = (b.scenes && b.scenes[sc]) || {};
+      const over = Object.keys(lims).filter((c) => v[c] != null && v[c] > lims[c]);
+      for (const c of over) fails.push(`${name}.scenes.${sc}.${c} = ${v[c]} > budget ${lims[c]}`);
+      const note = Object.keys(lims).length ? `  budget ${Object.entries(lims).map(([c, l]) => `${c} ${l}`).join(', ')}${over.length ? '  OVER BUDGET' : '  ok'}` : '';
+      console.log(`    ${sc.padEnd(8)}${cols.map((c) => fmt(v[c]).padStart(9)).join('')}${note}`);
+    }
   }
   if (m.play) {
     const cols = ['sec', 'actions', 'gameClock', 'frameP50', 'frameP95', 'frameMax', 'maxLongTask', 'longTaskMs'];
