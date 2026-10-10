@@ -28,6 +28,16 @@ AT.audio = (() => {
     ctx = new AC();
     ({ master, musicBus, sfxBus, voiceBus, duck } = build(ctx));
     master.gain.value = muted ? 0 : 1;
+    // iOS stops the context for a call, Siri or an alarm ('interrupted', or 'suspended'): carry on
+    // when it lets go, unless the game paused it itself (or it was never started by a tap)
+    let started = false;
+    const back = () => {
+      if (ctx.state === 'running') { started = true; return; }
+      if (!started || ctx.state === 'closed' || pausedFor.size || document.hidden || rec.on) return;
+      try { const p = ctx.resume(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* refused */ }
+      keepSession();
+    };
+    if (ctx.addEventListener) ctx.addEventListener('statechange', back);
   }
   // Sound pauses for two reasons, which can overlap: 'refit', while the game clock is
   // paused (sprites being repainted after a resize: hold()), so narration does not run
@@ -43,7 +53,7 @@ AT.audio = (() => {
     if (!ctx || rec.on) return;
     const quiet = (p) => { if (p && p.catch) p.catch(() => {}); };
     try {
-      if (on && !was) { resumeAfter = ctx.state === 'running'; if (resumeAfter && ctx.suspend) quiet(ctx.suspend()); }
+      if (on && !was) { resumeAfter = ctx.state === 'running' || ctx.state === 'interrupted'; if (resumeAfter && ctx.suspend) quiet(ctx.suspend()); }
       else if (!on && !pausedFor.size && resumeAfter) { resumeAfter = false; quiet(ctx.resume()); }
     } catch (e) { /* old Web Audio */ }
   }
@@ -52,58 +62,92 @@ AT.audio = (() => {
   // ---------- iPhone and iPad: the silent switch ----------
   // iOS plays Web Audio as 'ambient' sound, which the ring/silent switch mutes, while <video>
   // and <audio> elements play through it (so the cartoons were heard and nothing else).
-  // navigator.audioSession.type = 'playback' fixes that on iOS 17+, but not in every embed
-  // (the claude.ai artifact frame, older iOS). A silent, looping <audio> element started from
-  // a tap does it everywhere: while it plays, the page's sound is 'playback' and Web Audio is
-  // heard too. It is paused while the page is hidden, never started over a playing cartoon (a
-  // phone allows one), and started again by the next tap after anything stopped it.
-  // ?unmute=1 forces it on elsewhere (tests), ?unmute=0 off.
+  // navigator.audioSession.type = 'playback' fixes that on iOS 17+, but WebKit ignores it in a
+  // frame not allowed the microphone (the claude.ai artifact frame) and on older iOS. A silent,
+  // looping <audio> element started from a tap does it everywhere: while it plays, the page's
+  // sound is 'playback' and Web Audio is heard too. Once a tap has started it, it may start again
+  // without one: after a cartoon (which takes the sound over and pauses it) and when the page
+  // comes back; it is paused while the page is hidden, and never started over a playing cartoon.
+  // (A short clip: from about a second, iOS shows it on the lock screen. Never muted or at volume 0:
+  // WebKit then counts it as silent and the page stays 'ambient'.) ?unmute=1 forces it on
+  // elsewhere (tests), ?unmute=0 off.
   const unmuteParam = new URLSearchParams(location.search).get('unmute');
   const appleTouch = /iP(hone|ad|od)/.test(navigator.userAgent) ||
     (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1); // (iPadOS asks for desktop pages)
   const wantKeeper = unmuteParam ? unmuteParam === '1' : appleTouch;
-  let keeper = null;
-  function silentWav() {
-    // half a second of 8 kHz 8-bit mono silence (128 is the 8-bit zero)
-    const n = 4000;
-    const b = new Uint8Array(44 + n);
+  const kstats = { plays: 0, refused: 0, errors: 0 };
+  let keeper = null, keeperBlob = false;
+  function silentWav(rate) {
+    // a quarter of a second of 16-bit mono silence at the context's rate (no resampling)
+    const n = Math.round(rate / 4);
+    const b = new Uint8Array(44 + n * 2);
     const dv = new DataView(b.buffer);
     const ws = (o, s) => { for (let i = 0; i < s.length; i++) b[o + i] = s.charCodeAt(i); };
-    ws(0, 'RIFF'); dv.setUint32(4, 36 + n, true); ws(8, 'WAVE'); ws(12, 'fmt ');
+    ws(0, 'RIFF'); dv.setUint32(4, 36 + n * 2, true); ws(8, 'WAVE'); ws(12, 'fmt ');
     dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
-    dv.setUint32(24, 8000, true); dv.setUint32(28, 8000, true); dv.setUint16(32, 1, true); dv.setUint16(34, 8, true);
-    ws(36, 'data'); dv.setUint32(40, n, true);
-    b.fill(128, 44);
-    let s = '';
-    for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
-    return 'data:audio/wav;base64,' + btoa(s);
+    dv.setUint32(24, rate, true); dv.setUint32(28, rate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+    ws(36, 'data'); dv.setUint32(40, n * 2, true);
+    return b;
   }
+  const keeperBytes = () => silentWav(ctx ? Math.round(ctx.sampleRate) : 44100);
+  const cartoonPlaying = () => Array.prototype.some.call(document.querySelectorAll('video'), (v) => !v.paused && !v.ended);
   function keepSession() {
     if (!wantKeeper || rec.on || document.hidden) return;
     const E = AT.engine;
     if (E && (E.recording || E.manual) && unmuteParam !== '1') return;
-    if (Array.prototype.some.call(document.querySelectorAll('video'), (v) => !v.paused && !v.ended)) return;
+    if (cartoonPlaying()) return;
     if (!keeper) {
       keeper = document.createElement('audio');
       keeper.setAttribute('x-webkit-airplay', 'deny');
+      keeper.setAttribute('playsinline', '');
       keeper.disableRemotePlayback = true;
       keeper.controls = false;
       keeper.loop = true;
       keeper.preload = 'auto';
-      keeper.src = silentWav();
+      const b = keeperBytes();
+      let s = '';
+      for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+      keeper.src = 'data:audio/wav;base64,' + btoa(s);
+      // a page that may not play data: audio gets the same clip from a blob: URL
+      keeper.addEventListener('error', () => {
+        kstats.errors++;
+        if (keeperBlob) return;
+        keeperBlob = true;
+        try { keeper.src = URL.createObjectURL(new Blob([keeperBytes()], { type: 'audio/wav' })); keepSession(); } catch (e) { /* no blobs */ }
+      });
+      // paused by the system (a cartoon, a call): started again when the page is free of it
+      // (at most once a second: not a loop against a call that keeps stopping it)
+      let lastAuto = 0;
+      keeper.addEventListener('pause', () => setTimeout(() => {
+        const now = performance.now();
+        if (now - lastAuto < 1000) return;
+        lastAuto = now;
+        keepSession();
+      }, 0));
     }
     if (!keeper.paused) return;
-    try { const p = keeper.play(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* not allowed yet */ }
+    try {
+      const p = keeper.play();
+      if (p && p.then) p.then(() => { kstats.plays++; }, () => { kstats.refused++; });
+    } catch (e) { kstats.refused++; }
   }
   function releaseSession() { if (keeper && !keeper.paused) keeper.pause(); }
 
   function unlock() {
+    // the silent <audio> first: the sound session changes as it starts
+    keepSession();
     init();
     if (!ctx) return;
     try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { /* optional */ }
-    keepSession();
+    // resumed inside the tap, even during a pause (a resume later, without a tap, iOS may
+    // refuse): suspended again at once, and resumed when the pause ends
+    if (ctx.state !== 'running') {
+      try {
+        const p = ctx.resume();
+        if (p && p.then) p.then(() => { if (pausedFor.size && ctx.state === 'running') { resumeAfter = true; ctx.suspend().catch(() => {}); } }, () => {});
+      } catch (e) { /* old Web Audio */ }
+    }
     if (pausedFor.size) resumeAfter = true; // resumed when the pause ends
-    else if (ctx.state !== 'running') ctx.resume();
     const b = ctx.createBuffer(1, 1, 22050);
     const s = ctx.createBufferSource();
     s.buffer = b; s.connect(ctx.destination); s.start(0);
@@ -591,7 +635,7 @@ AT.audio = (() => {
   // hold(), so a resize repaint still under way when the page comes back keeps it quiet.
   document.addEventListener('visibilitychange', () => {
     const E = AT.engine;
-    if (document.hidden) releaseSession(); // (started again by the next tap)
+    if (document.hidden) releaseSession(); else keepSession();
     if (!ctx || rec.on || !E || E.recording || E.manual) return;
     pauseSound('hidden', document.hidden);
   });
@@ -669,6 +713,7 @@ AT.audio = (() => {
     get ready() { return !!ctx && ctx.state === 'running'; },
     get ctx() { return ctx; },
     get keeper() { return keeper; }, // (tests)
+    keepSession, keeperStats: () => ({ ...kstats }),
     resumeMusic() { if (cur && cur.pending) { const n = cur.name; cur = null; music(n); } },
   };
 })();

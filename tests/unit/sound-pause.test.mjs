@@ -12,8 +12,10 @@ class FakeAudioContext {
   createDynamicsCompressor() { const p = { value: 0 }; return this.node({ threshold: p, ratio: p, attack: p, release: p }); }
   createBuffer(ch, len, sr) { return { numberOfChannels: ch, length: len, sampleRate: sr, duration: len / sr }; }
   createBufferSource() { return this.node({ buffer: null, start() {}, stop() {} }); }
-  resume() { this.state = 'running'; return Promise.resolve(); }
+  resume() { this.resumes = (this.resumes || 0) + 1; this.state = 'running'; return Promise.resolve(); }
   suspend() { this.state = 'suspended'; return Promise.resolve(); }
+  addEventListener(type, fn) { if (type === 'statechange') this.onchange = fn; }
+  set(state) { this.state = state; if (this.onchange) this.onchange(); }
 }
 
 function boot() {
@@ -65,7 +67,7 @@ test('a resize while the page is hidden (a rotation in the background) keeps sou
   assert.equal(ctx.state, 'running');
 });
 
-test('sound that was not running stays off after a pause; a tap during the pause resumes it when the pause ends', () => {
+test('sound that was not running stays off after a pause; a tap during the pause resumes it when the pause ends', async () => {
   const { AT, ctx, setHidden } = boot();
   ctx.state = 'suspended'; // e.g. the browser has not allowed sound yet
   AT.audio.hold(true);
@@ -74,8 +76,42 @@ test('sound that was not running stays off after a pause; a tap during the pause
   AT.audio.hold(false);
   assert.equal(ctx.state, 'suspended', 'a pause never starts sound by itself');
   AT.audio.hold(true);
+  const n = ctx.resumes || 0;
   AT.audio.unlock(); // a tap on the still scene
+  // resumed inside the tap (iOS may refuse a resume later, without one), suspended again at once
+  assert.equal(ctx.resumes, n + 1, 'resumed during the tap');
+  await new Promise((r) => setTimeout(r, 0));
   assert.equal(ctx.state, 'suspended', 'not while the repaint holds it');
   AT.audio.hold(false);
   assert.equal(ctx.state, 'running');
+});
+
+test('iOS stopping the sound (a call, Siri: \'interrupted\') starts it again when it lets go, but never a pause of the game\'s own', () => {
+  const { AT, ctx, setHidden } = boot();
+  ctx.set('running');
+  ctx.set('interrupted');
+  assert.equal(ctx.state, 'running', 'resumed by itself');
+  // the game's own pauses are left alone
+  AT.audio.hold(true);
+  ctx.set('suspended');
+  assert.equal(ctx.state, 'suspended');
+  AT.audio.hold(false);
+  assert.equal(ctx.state, 'running');
+  setHidden(true);
+  assert.equal(ctx.state, 'suspended');
+  ctx.set('interrupted');
+  assert.equal(ctx.state, 'interrupted', 'not while the page is hidden');
+  setHidden(false);
+  assert.equal(ctx.state, 'running', 'interrupted counted as running when the pause began');
+});
+
+test('a context never started by a tap is not started by a state change', () => {
+  const listeners = {};
+  const doc = { ...loadGame({ only: ['(none)'] }).document, hidden: false };
+  doc.addEventListener = (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); };
+  const game = loadGame({ globals: { document: doc, AudioContext: FakeAudioContext } });
+  game.AT.audio.init();
+  const ctx = FakeAudioContext.last;
+  ctx.set('suspended');
+  assert.equal(ctx.state, 'suspended');
 });

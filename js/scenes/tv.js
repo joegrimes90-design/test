@@ -65,11 +65,12 @@ AT.scenes.tv = {
       setPlayingLook(true);
       buttons.forEach((b) => b.set({ s: b.ep === ep ? 0.62 : 0.52 }));
     };
-    video.addEventListener('ended', () => { setPlayingLook(false); AT.audio.music('happy'); });
-    video.addEventListener('pause', () => setPlayingLook(false));
+    // (the cartoon took the page's sound over: AT.audio.keepSession takes it back for the game's own)
+    video.addEventListener('ended', () => { setPlayingLook(false); AT.audio.keepSession(); AT.audio.music('happy'); });
+    video.addEventListener('pause', () => { setPlayingLook(false); AT.audio.keepSession(); });
     video.addEventListener('play', () => setPlayingLook(true));
     video.addEventListener('error', () => { msg.textContent = 'This cartoon is still being painted!'; setPlayingLook(false); });
-    E.onEnd(() => { video.pause(); video.removeAttribute('src'); video.load(); });
+    E.onEnd(() => { video.pause(); video.removeAttribute('src'); video.load(); AT.audio.keepSession(); });
 
     // 'click' so the video is allowed to start with sound on phones and tablets
     buttons.forEach((b) => E.onTap(b, () => { AT.audio.sfx('pop'); play(b.ep); }, { event: 'click' }));
