@@ -5,10 +5,9 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const port = +(process.argv[2] || process.env.PORT || 4173);
 const types = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png',
@@ -16,7 +15,8 @@ const types = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
-const server = http.createServer((req, res) => {
+// (also used in-process by tests/helpers/webkit.mjs)
+export const createStaticServer = () => http.createServer((req, res) => {
   const url = decodeURIComponent(req.url.split('?')[0]);
   if (url === '/favicon.ico') { res.writeHead(204); return res.end(); }
   const p = path.join(root, url.endsWith('/') ? url + 'index.html' : url);
@@ -36,4 +36,7 @@ const server = http.createServer((req, res) => {
   if (req.method === 'HEAD') return res.end();
   fs.createReadStream(p).pipe(res);
 });
-server.listen(port, '127.0.0.1', () => console.log(`serving ${root} at http://127.0.0.1:${port}/`));
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  const port = +(process.argv[2] || process.env.PORT || 4173);
+  createStaticServer().listen(port, '127.0.0.1', () => console.log(`serving ${root} at http://127.0.0.1:${port}/`));
+}

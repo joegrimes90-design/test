@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ink check</title>
+<!-- tests/webkit/ink.test.mjs: each sprite three times, side by side:
+       game   the game's own sprite (a game Node, through the bitmap layer, or ?raster=svg)
+       noink  its SVG with the ink lines taken out
+       plain  its SVG with the ink lines drawn without their filter
+     Where "game" is darker than "noink" is the ink that shows; "plain" says how much there is. -->
+<link rel="stylesheet" href="../../css/style.css">
+<style>
+  html, body { overflow: hidden; height: auto; margin: 0; background: #fff; }
+  #page, #refs { position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: hidden; }
+  #refs img { position: absolute; }
+</style>
+</head>
+<body>
+<div id="page"></div>
+<div id="refs"></div>
+<script src="../../js/art-core.js"></script>
+<script src="../../js/art-characters.js"></script>
+<script src="../../js/art-props.js"></script>
+<script src="../../js/art-scenes.js"></script>
+<script src="../../js/engine.js"></script>
+<script src="../../js/game.js"></script>
+<script>
+  // An ink line: a path or text with one of the ink filters (k, ks, ke and their per-transform copies).
+  var INK_EL = /<(path|text)\b[^>]*filter="url\(#k[se]?(?:_\d+)?\)"[^>]*?(?:\/>|>[^<]*<\/text>)/g;
+  var INK_ATTR = / filter="url\(#k[se]?(?:_\d+)?\)"/g;
+  function svgImg(text, x, y, w, h) {
+    var im = new Image();
+    im.style.left = x + 'px'; im.style.top = y + 'px'; im.style.width = w + 'px'; im.style.height = h + 'px';
+    im.src = URL.createObjectURL(new Blob([text], { type: 'image/svg+xml' }));
+    document.getElementById('refs').appendChild(im);
+    return im.decode();
+  }
+  // cells: [{id, s, x, y}] (CSS px): game at x, noink at x + w + gap, plain at x + 2 (w + gap)
+  window.render = async function (cells, gap) {
+    var root = document.getElementById('page');
+    var waits = [];
+    var out = cells.map(function (c) {
+      var b = AT.art.box(c.id), w = Math.ceil(b[2] * c.s), h = Math.ceil(b[3] * c.s);
+      AT.engine.node(root, { sprite: c.id }).set({ x: c.x - b[0] * c.s, y: c.y - b[1] * c.s, s: c.s });
+      var svg = AT.art.svgOf(c.id);
+      var inkLines = (svg.match(INK_EL) || []).length;
+      waits.push(svgImg(svg.replace(INK_EL, ''), c.x + w + gap, c.y, b[2] * c.s, b[3] * c.s));
+      waits.push(svgImg(svg.replace(INK_ATTR, ''), c.x + 2 * (w + gap), c.y, b[2] * c.s, b[3] * c.s));
+      return { id: c.id, x: c.x, y: c.y, w: w, h: h, inkLines: inkLines };
+    });
+    await Promise.all(waits);
+    await AT.art.fit(root);
+    await AT.art.idle();
+    await AT.imagesReady(document.body, 60000);
+    await new Promise(function (r) { requestAnimationFrame(function () { requestAnimationFrame(r); }); });
+    var imgs = root.querySelectorAll('img[data-sprite]');
+    return { cells: out, mode: AT.art.mode, bitmaps: root.querySelectorAll('img[data-k]').length, imgs: imgs.length, dpr: devicePixelRatio, innerWidth: innerWidth };
+  };
+  window.__ready = true;
+</script>
+</body>
+</html>

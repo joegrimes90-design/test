@@ -8,6 +8,7 @@
     "test:unit": "node --test \"tests/unit/**/*.test.mjs\"",
     "test:e2e": "playwright test --project=e2e",
     "test:visual": "playwright test --project=visual",
+    "test:webkit": "node --test --test-concurrency=1 \"tests/webkit/**/*.test.mjs\"",
     "test:update-baselines": "playwright test --project=visual --update-snapshots=all",
     "perf": "node tests/perf/check.mjs",
     "serve": "node tests/server.mjs"
