@@ -1004,9 +1004,9 @@ ${inkFilter('ke', s, r)}
     if (encoder !== undefined) return encoder;
     encoder = null;
     try {
-      // (?enc=toblob, and the one-file artifact bundle: its host's Content-Security-Policy may forbid
-      // blob: workers, and a refused worker logs a console error; tools/build-artifact.mjs sets AT_BUNDLE)
-      if (params.get('enc') === 'toblob' || window.AT_BUNDLE || typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined' || !OffscreenCanvas.prototype.convertToBlob) return null;
+      // (?enc=toblob turns it off. The one-file artifact bundle uses it too: the artifact host allows
+      // blob: workers, and a worker that fails anyway falls back to canvas.toBlob, see newEncoder)
+      if (params.get('enc') === 'toblob' || typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined' || !OffscreenCanvas.prototype.convertToBlob) return null;
       encoder = newEncoder().w;
     } catch (e) { encoder = null; }
     return encoder;

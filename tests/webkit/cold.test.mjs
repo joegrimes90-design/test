@@ -34,7 +34,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 test('WebKit at 2x, a first visit: every scene is shown within its budget, and long paints wait for calm moments', { skip: missing || false, timeout: 900000 }, async (t) => {
   const wk = await launchWebKit({ width: 1280, height: 720, scale: 2 });
   try {
-    await wk.goto('/index.html');
+    await wk.goto(process.env.COLD_PAGE || '/index.html');
     await wk.exec(`window.__errors = []; const ce = console.error.bind(console); console.error = (...a) => { window.__errors.push(a.map(String).join(' ')); ce(...a); };
       window.addEventListener('error', (e) => window.__errors.push(String(e.message))); window.addEventListener('unhandledrejection', (e) => window.__errors.push('rejection: ' + String(e.reason))); return 1`);
     await wk.waitFor(`return performance.getEntriesByName('at:shown:title').length > 0`, { timeout: 120000, interval: 50 });
