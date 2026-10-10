@@ -15,6 +15,10 @@
 //    the boot probe decides there) and with ?raster=svg, at devicePixelRatio 1 and 2.
 // 2. The title scene: every puppet shows one pair of eyes and one mouth, and each of them
 //    darkens the face under it.
+// 3. Bitmaps at k = 2 (every iPad and iPhone) are painted at that resolution: WebKit works out an
+//    SVG image's filters at the image's own size, so the plain way of painting them (drawImage of
+//    the 1x image, at 2x) magnified a 1x picture: every face part soft, thin lines paler. The bitmap
+//    layer paints from SVGs sized to the bitmap there (AT.art.sized, js/art-core.js sizedCheck).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -25,7 +29,7 @@ import { loadGame, ROOT } from '../helpers/load-game.mjs';
 
 const missing = webkitMissing();
 const OUT = path.join(ROOT, 'test-results', 'webkit');
-const INK_MIN = 0.5; // measured (WebKitGTK 2.52): 86-125% of the unfiltered ink's pixels; 0% for every one with the old 5000x5000 ink region
+const INK_MIN = 0.5; // measured (WebKitGTK 2.52): 86-127% of the unfiltered ink's pixels; 0% for every one with the old 5000x5000 ink region
 const DARKER = 40; // luminance levels (0-255) darker than without the ink
 
 const A = loadGame({ only: ['art-'] }).AT.art;
@@ -36,7 +40,7 @@ const INK_ONLY = all.filter((id) => {
   const els = [...body(id).matchAll(/<(path|text)\b[^>]*>/g)].map((m) => m[0]);
   return els.length && els.every((e) => /filter="url\(#k/.test(e));
 });
-const TRANSFORMED = all.filter((id) => /<path[^>]*filter="url\(#k[se]?_\d+\)"/.test(body(id)));
+const TRANSFORMED = all.filter((id) => [...body(id).matchAll(/<path\b[^>]*>/g)].some((m) => /filter="url\(#k/.test(m[0]) && / transform="/.test(m[0])));
 const IDS = [...new Set([...FACES, ...INK_ONLY, ...TRANSFORMED])];
 
 const lum = (d, o) => 0.299 * d[o] + 0.587 * d[o + 1] + 0.114 * d[o + 2];
@@ -170,3 +174,26 @@ for (const cfg of CONFIGS.slice(0, 2)) {
     }
   });
 }
+
+// measured (WebKitGTK 2.52): the game's bitmap has 1.09-1.80 times the gradient energy of the plain
+// way (median 1.47); painted the plain way, 1.00-1.01
+const SHARP_MIN = 1.05, SHARP_MEDIAN = 1.25;
+test('WebKit: bitmaps at k = 2 are painted at that resolution, not magnified from 1x', { skip: missing || false, timeout: 600000 }, async (t) => {
+  const ids = [...FACES, 'star', 'toothbrush', 'stool', 'badge_teeth', 'shelf_panel'];
+  const wk = await launchWebKit({ width: 1280, height: 720, scale: 1 });
+  try {
+    await wk.goto('/tests/webkit/sprites.html');
+    await wk.waitFor('return window.__ready === true && !!(window.AT && AT.art)');
+    const r = await wk.execAsync('return await window.sharpness(arguments[0], arguments[1]);', ids, 2);
+    assert.equal(r.mode, 'bitmap');
+    assert.equal(r.sized, true, 'the boot probe finds WebKit filters an SVG image at its own size (AT.art.sized)');
+    const ratios = r.rows.map((x) => ({ id: x.id, v: x.plain ? x.game / x.plain : 0 }));
+    t.diagnostic(`gradient energy, game / plain: ${ratios.map((x) => `${x.id} ${x.v.toFixed(2)}`).join(', ')}`);
+    const sorted = ratios.map((x) => x.v).sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    assert.deepEqual(ratios.filter((x) => !(x.v >= SHARP_MIN)).map((x) => `${x.id} ${x.v.toFixed(2)}`), [], 'bitmaps no sharper than a magnified 1x picture');
+    assert.ok(median >= SHARP_MEDIAN, `median ${median.toFixed(2)}`);
+  } finally {
+    await wk.close();
+  }
+});

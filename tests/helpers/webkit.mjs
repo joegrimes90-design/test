@@ -136,6 +136,31 @@ export async function launchWebKit({ width = 1280, height = 720, scale = 1 } = {
           await sleep(interval);
         }
       },
+      /** Resident memory (MB) of the largest WebKitWebProcess this session started (the page's content process). */
+      webProcessMB: () => {
+        const kids = new Map();
+        for (const d of fs.readdirSync('/proc')) {
+          if (!/^\d+$/.test(d)) continue;
+          try {
+            const st = fs.readFileSync(`/proc/${d}/stat`, 'utf8');
+            const ppid = +st.slice(st.lastIndexOf(')') + 2).split(' ')[1];
+            if (!kids.has(ppid)) kids.set(ppid, []);
+            kids.get(ppid).push(+d);
+          } catch (e) { /* gone */ }
+        }
+        let max = 0;
+        const visit = (pid) => {
+          for (const c of kids.get(pid) || []) {
+            try {
+              const status = fs.readFileSync(`/proc/${c}/status`, 'utf8');
+              if (/^Name:\s*WebKitWebProces/m.test(status)) max = Math.max(max, +(/^VmRSS:\s*(\d+)/m.exec(status) || [0, 0])[1] / 1024);
+            } catch (e) { /* gone */ }
+            visit(c);
+          }
+        };
+        visit(drv.pid);
+        return Math.round(max);
+      },
       /** A PNG of the viewport (device pixels). */
       screenshot: async () => Buffer.from(await wd('GET', S + '/screenshot'), 'base64'),
     };

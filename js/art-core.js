@@ -117,20 +117,23 @@ AT.art = (() => {
   // bg  : big soft background wash
   // k   : ink line, ks: fine ink line, ke: solid ink for closed eyes (no pencil grain, so they never fade out)
   //
-  // The ink filters' region is the sprite's viewBox plus INK_PAD, in user units. WebKit
-  // (Safari, iPad, iPhone) draws nothing at all for an element whose filter region is over
-  // 4096 x 4096 px (tests/unit/filters.test.mjs): with the 5000 x 5000 region the ink used to
-  // have, every outline, brow, line mouth and line eye was missing there. The region stays
-  // inside that old one (-2000..3000), which Chromium has always clipped to: bg_bathroom ends
-  // at x 3000 and its floor lines run past it, and keeping that edge keeps Chromium's pixels
-  // bit-identical.
+  // Each ink line's filter region is the line's own bounding box plus its reach (see inkBox), in
+  // user units. WebKit (Safari, iPad, iPhone) draws nothing at all for an element whose filter
+  // region is over 4096 x 4096 px (tests/unit/filters.test.mjs): with the 5000 x 5000 region the
+  // ink used to have, every outline, brow, line mouth and line eye was missing there. And WebKit
+  // allocates every filter primitive's buffer at the full region, for each line: with the
+  // sprite's whole viewBox as the region a background's dozen lines made painting it three
+  // times slower and memory grew until the page crashed. The region stays inside the old one
+  // (-2000..3000), which Chromium has always clipped to: bg_bathroom's floor lines run past
+  // x 3000, and keeping that edge keeps Chromium's pixels bit-identical (inside it the region
+  // only crops the filter's output: the noise is laid out in user space).
   const INK_PAD = 24, INK_OLD = [-2000, 3000];
   const INK = { k: [4, 2.2, 0.35], ks: [1.6, 1.6, 0.25], ke: [1.4, 0.4, 0.3] }; // wobble, grain, blur
   // [x, y, w, h] of the region from its corners, within the old one
   function inkRegion(x0, y0, x1, y1) {
     x0 = Math.max(x0, INK_OLD[0]); y0 = Math.max(y0, INK_OLD[0]);
     x1 = Math.min(x1, INK_OLD[1]); y1 = Math.min(y1, INK_OLD[1]);
-    return [x0, y0, x1 - x0, y1 - y0];
+    return [x0, y0, Math.max(0, x1 - x0), Math.max(0, y1 - y0)];
   }
   const inkFilter = (id, seed, r) => {
     const [wob, grain, blur] = INK[id.replace(/_.*/, '')];
@@ -144,42 +147,69 @@ AT.art = (() => {
 <feGaussianBlur in="p" stdDeviation="${blur}"/>
 </filter>`;
   };
-  // A stroke with a transform (the mirrored left leg, teddy's tilted arms) is filtered in its
-  // own, transformed user space, so it gets an ink filter of its own whose region is the
-  // padded viewBox mapped into that space. (Filtering it from an untransformed wrapping group
-  // would also do for WebKit, but would move its pencil grain: the noise is laid out in the
-  // filter's user space.)
-  function tfMatrix(tf) {
-    let m = [1, 0, 0, 1, 0, 0];
-    const mul = (a, b) => [a[0] * b[0] + a[2] * b[1], a[1] * b[0] + a[3] * b[1], a[0] * b[2] + a[2] * b[3], a[1] * b[2] + a[3] * b[3], a[0] * b[4] + a[2] * b[5] + a[4], a[1] * b[4] + a[3] * b[5] + a[5]];
-    tf.replace(/(\w+)\s*\(([^)]*)\)/g, (all, fn, args) => {
-      const v = args.trim().split(/[\s,]+/).map(Number);
-      let t;
-      if (fn === 'translate') t = [1, 0, 0, 1, v[0], v[1] || 0];
-      else if (fn === 'scale') t = [v[0], 0, 0, v.length > 1 ? v[1] : v[0], 0, 0];
-      else if (fn === 'rotate') {
-        const a = (v[0] * Math.PI) / 180, c = Math.cos(a), sn = Math.sin(a);
-        t = mul(mul([1, 0, 0, 1, v[1] || 0, v[2] || 0], [c, sn, -sn, c, 0, 0]), [1, 0, 0, 1, -(v[1] || 0), -(v[2] || 0)]);
-      } else if (fn === 'matrix') t = v;
-      else throw new Error('Unsupported transform ' + fn);
-      m = mul(m, t);
-      return all;
-    });
-    return m;
+  // Bounding box [x0, y0, x1, y1] of path data, a superset: Bezier control points count, and an
+  // arc counts as its whole ellipse. (tests/unit/filters.test.mjs checks it against sampled
+  // outlines; null when the data can't be read.)
+  // An SVG arc's whole ellipse, from its end point parameters (SVG 1.1 F.6.5, radii scaled up
+  // when too small for the chord), passed to add(x, y, 0) as the corners of its box.
+  function arcBox(x1, y1, rx, ry, phi, fa, fs, x2, y2, add) {
+    rx = Math.abs(rx); ry = Math.abs(ry);
+    add(x1, y1); add(x2, y2);
+    if (!rx || !ry) return;
+    const a = (phi * Math.PI) / 180, c = Math.cos(a), sn = Math.sin(a);
+    const dx = (x1 - x2) / 2, dy = (y1 - y2) / 2;
+    const xp = c * dx + sn * dy, yp = -sn * dx + c * dy;
+    const lam = (xp * xp) / (rx * rx) + (yp * yp) / (ry * ry);
+    if (lam > 1) { rx *= Math.sqrt(lam); ry *= Math.sqrt(lam); }
+    const num = rx * rx * ry * ry - rx * rx * yp * yp - ry * ry * xp * xp;
+    const co = Math.sqrt(Math.max(0, num / (rx * rx * yp * yp + ry * ry * xp * xp))) * (+fa === +fs ? -1 : 1);
+    const cxp = (co * rx * yp) / ry, cyp = (-co * ry * xp) / rx;
+    const ecx = c * cxp - sn * cyp + (x1 + x2) / 2, ecy = sn * cxp + c * cyp + (y1 + y2) / 2;
+    const hx = Math.hypot(rx * c, ry * sn), hy = Math.hypot(rx * sn, ry * c);
+    add(ecx - hx, ecy - hy); add(ecx + hx, ecy + hy);
   }
-  let inkTf = null; // while svgOf draws a sprite: {seed, box, ids: {kf + tf: id}, out: filters}
-  function inkFilterFor(kf, tf) {
-    const key = kf + ' ' + tf;
+  const PATH_ARGS = { M: 2, L: 2, H: 1, V: 1, C: 6, S: 4, Q: 4, T: 2, A: 7, Z: 0 };
+  function pathBox(d) {
+    const tok = d.match(/[A-Za-z]|[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/g) || [];
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, cx = 0, cy = 0, sx = 0, sy = 0, i = 0, cmd = '';
+    const add = (x, y, r) => { r = r || 0; x0 = Math.min(x0, x - r); y0 = Math.min(y0, y - r); x1 = Math.max(x1, x + r); y1 = Math.max(y1, y + r); };
+    while (i < tok.length) {
+      if (/[A-Za-z]/.test(tok[i])) cmd = tok[i++];
+      const U = cmd.toUpperCase(), rel = cmd !== U, n = PATH_ARGS[U];
+      if (n === undefined) return null;
+      if (U === 'Z') { cx = sx; cy = sy; continue; }
+      const v = tok.slice(i, i + n).map(Number);
+      i += n;
+      if (v.length < n || v.some(isNaN)) return null;
+      const ox = rel ? cx : 0, oy = rel ? cy : 0;
+      if (U === 'H') { cx = v[0] + ox; add(cx, cy); }
+      else if (U === 'V') { cy = v[0] + oy; add(cx, cy); }
+      else if (U === 'A') {
+        const nx = v[5] + ox, ny = v[6] + oy;
+        arcBox(cx, cy, v[0], v[1], v[2], v[3], v[4], nx, ny, add);
+        cx = nx; cy = ny;
+      } else { for (let j = 0; j < n; j += 2) add(v[j] + ox, v[j + 1] + oy); cx = v[n - 2] + ox; cy = v[n - 1] + oy; }
+      if (U === 'M') { sx = cx; sy = cy; cmd = rel ? 'l' : 'L'; }
+    }
+    return x0 <= x1 ? [x0, y0, x1, y1] : null;
+  }
+  // The ink filter region of a line with path data d and width sw (filter kf), in the line's own
+  // user space (its transform included, so a transformed line needs nothing more): its bounding
+  // box plus how far the filter can reach from it (half the width, the displacement, three blur
+  // radii) and 4 units of slack, rounded out to whole units; null: the sprite's box will do.
+  function inkBox(kf, d, sw) {
+    const b = pathBox(d);
+    if (!b) return null;
+    const [wob, , blur] = INK[kf];
+    const pad = sw / 2 + wob + 3 * blur + 4;
+    return inkRegion(Math.floor(b[0] - pad), Math.floor(b[1] - pad), Math.ceil(b[2] + pad), Math.ceil(b[3] + pad));
+  }
+  let inkTf = null; // while svgOf draws a sprite: {seed, ids: {kf + region: id}, out: filters, area, det}
+  // the id of an ink filter with region r (one per region and kind, in this sprite's defs)
+  function inkFilterAt(kf, r) {
+    const key = kf + ' ' + r.join(',');
     if (inkTf.ids[key]) return inkTf.ids[key];
     const id = kf + '_' + Object.keys(inkTf.ids).length;
-    const [a, b, c, d, e, f] = tfMatrix(tf);
-    const det = a * d - b * c;
-    const [bx, by, bw, bh] = inkTf.box;
-    // the padded viewBox's corners in the stroke's user space (the inverse transform)
-    const pts = [[bx - INK_PAD, by - INK_PAD], [bx + bw + INK_PAD, by - INK_PAD], [bx - INK_PAD, by + bh + INK_PAD], [bx + bw + INK_PAD, by + bh + INK_PAD]]
-      .map(([x, y]) => [(d * (x - e) - c * (y - f)) / det, (a * (y - f) - b * (x - e)) / det]);
-    const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
-    const r = inkRegion(Math.floor(Math.min(...xs)), Math.floor(Math.min(...ys)), Math.ceil(Math.max(...xs)), Math.ceil(Math.max(...ys)));
     inkTf.out += inkFilter(id, inkTf.seed, r);
     inkTf.ids[key] = id;
     return id;
@@ -231,6 +261,8 @@ ${inkFilter('ke', s, r)}
       const flt = fx === 'flat' ? '' : ` filter="url(#${fx})"`;
       const op = s.o != null ? ` opacity="${s.o}"` : '';
       out += `<path d="${s.d}" fill="${s.f}"${flt}${op}${tf}/>`;
+      // (its filter region: 150% of its box each way)
+      if (flt && inkTf) { const b = pathBox(s.d); if (b) inkTf.area = Math.max(inkTf.area, 2.25 * (b[2] - b[0]) * (b[3] - b[1]) * inkTf.det * detOf(s.tf)); }
     }
     const k = s.k === undefined ? (s.f && s.f !== 'none' ? inkOf(s.f) : SEPIA) : s.k;
     if (k) {
@@ -238,15 +270,39 @@ ${inkFilter('ke', s, r)}
       const kf = s.kf || (sw < 2.6 ? 'ks' : 'k');
       const ko = s.ko != null ? ` opacity="${s.ko}"` : '';
       const stroke = `<path d="${s.d}" fill="none" stroke="${k}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"`;
-      // a transformed stroke gets an ink filter of its own (see inkFilterFor); outside svgOf
-      // it is filtered from an untransformed wrapping group instead
-      if (!tf) out += `${stroke} filter="url(#${kf})"${ko}/>`;
-      else if (inkTf) out += `${stroke} filter="url(#${inkFilterFor(kf, s.tf)})"${ko}${tf}/>`;
+      // each line gets an ink filter whose region is its own box (inkBox); outside svgOf, and
+      // for path data it can't read, the sprite-wide one from defs (a transformed line filtered
+      // from an untransformed wrapping group, so that region stays in the sprite's coordinates)
+      const r = inkTf && inkBox(kf, s.d, sw);
+      if (r) {
+        out += `${stroke} filter="url(#${inkFilterAt(kf, r)})"${ko}${tf}/>`;
+        inkTf.area = Math.max(inkTf.area, r[2] * r[3] * inkTf.det * detOf(s.tf));
+      }
+      else if (!tf) out += `${stroke} filter="url(#${kf})"${ko}/>`;
       else out += `<g filter="url(#${kf})"${ko}>${stroke}${tf}/></g>`;
     }
     return out;
   }
-  const group = (shapes, tf) => ({ raw: `<g transform="${tf}">${flat(shapes).map(shapeSvg).join('')}</g>` });
+  function group(shapes, tf) {
+    const det = inkTf && inkTf.det;
+    if (inkTf) inkTf.det = det * detOf(tf);
+    try {
+      return { raw: `<g transform="${tf}">${flat(shapes).map(shapeSvg).join('')}</g>` };
+    } finally {
+      if (inkTf) inkTf.det = det;
+    }
+  }
+  // how much a transform attribute scales areas
+  function detOf(tf) {
+    let det = 1;
+    (tf || '').replace(/(\w+)\s*\(([^)]*)\)/g, (all, fn, args) => {
+      const v = args.trim().split(/[\s,]+/).map(Number);
+      if (fn === 'scale') det *= v[0] * (v.length > 1 ? v[1] : v[0]);
+      else if (fn === 'matrix') det *= v[0] * v[3] - v[1] * v[2];
+      return all;
+    });
+    return Math.abs(det);
+  }
   const flat = (a) => a.flat(Infinity).filter(Boolean);
 
   // Register a sprite. box = [x, y, w, h] in the drawing's own coordinates.
@@ -262,7 +318,8 @@ ${inkFilter('ke', s, r)}
     const sp = sprites[id];
     if (!sp) throw new Error('No sprite ' + id);
     const [x, y, w, h] = sp.box;
-    const tfInk = (inkTf = { seed: sp.seed, box: sp.box, ids: {}, out: '' });
+    // (area: the largest filter region, in sprite units squared: see sizedScale)
+    const tfInk = (inkTf = { seed: sp.seed, ids: {}, out: '', area: 0, det: 1 });
     let body;
     try {
       body = flat([sp.draw()]).map(shapeSvg).join('');
@@ -271,6 +328,9 @@ ${inkFilter('ke', s, r)}
     }
     let d = defs(sp.seed, sp.box);
     if (tfInk.out) d = d.replace(/<\/defs>$/, tfInk.out + '\n</defs>');
+    // (raw markup with a sprite-wide ink filter from defs: the block letters)
+    if (/filter="url\(#k[se]?\)"/.test(body)) tfInk.area = Math.max(tfInk.area, (w + 2 * INK_PAD) * (h + 2 * INK_PAD));
+    sp.filterArea = tfInk.area;
     return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${x} ${y} ${w} ${h}" width="${w}" height="${h}">${d}${body}</svg>`;
   }
   function url(id) {
@@ -555,6 +615,88 @@ ${inkFilter('ke', s, r)}
     }
     return checked;
   }
+  // WebKit (Safari, iPad, iPhone) works out an SVG image's filters at the image's own size and
+  // scales the result: drawn into a canvas at k = 2, every watercolour edge and pencil line came
+  // out of a 1x picture magnified (sharpness about half of Chromium's; thin ink paler), and so
+  // did the whole game on every iPad. A scale in the SVG's own width and height (the viewBox
+  // mapped onto more pixels) is honoured, so where this probe finds the filtered drawing differs
+  // between those two ways (a disc under a near-zero blur, at 4x), bitmaps are painted from a
+  // copy of the sprite's SVG sized to the bitmap (sizedImage). Chromium paints both ways alike,
+  // and keeps painting as before.
+  let sizedNeed = null; // the probe's answer once known
+  let sizedProbe = null;
+  function sizedCheck() {
+    if (!sizedProbe) {
+      sizedProbe = (async () => {
+        // (?sized=0: never, for comparisons)
+        if (mode !== 'bitmap' || typeof document === 'undefined' || params.get('sized') === '0') return false;
+        const K = 4;
+        const text = (s) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="' + 10 * s + '" height="' + 10 * s + '"><filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="10" height="10"><feGaussianBlur stdDeviation="0.01"/></filter><circle cx="5" cy="5" r="3.3" fill="#000" filter="url(#f)"/></svg>';
+        const alpha = async (s) => {
+          const u = URL.createObjectURL(new Blob([text(s)], { type: 'image/svg+xml' }));
+          try {
+            const im = new Image();
+            im.src = u;
+            await im.decode();
+            const cv = document.createElement('canvas');
+            cv.width = cv.height = 10 * K;
+            const g = cv.getContext('2d', { willReadFrequently: true });
+            g.drawImage(im, 0, 0, 10 * K, 10 * K);
+            return g.getImageData(0, 0, 10 * K, 10 * K).data;
+          } finally { URL.revokeObjectURL(u); }
+        };
+        try {
+          const a = await alpha(1), b = await alpha(K);
+          let diff = 0, sum = 0;
+          for (let i = 3; i < a.length; i += 4) { diff += Math.abs(a[i] - b[i]); sum += b[i]; }
+          // (WebKitGTK 2.52: 21% of the disc's alpha differs; Chromium: none)
+          return sum > 0 && diff / sum > 0.05;
+        } catch (e) { return false; }
+      })().then((v) => (sizedNeed = v));
+    }
+    return sizedProbe;
+  }
+  // The scale to paint sprite id's sized SVG at for a bitmap at k: k, or less where a filter region
+  // would pass WebKit's 4096 x 4096 px (tests/unit/filters.test.mjs) at k, which draws nothing for
+  // that element (then the rest of the way is a magnification, as before: softer, but all there).
+  const WEBKIT_FILTER_PX = 4096 * 4096 * 0.9;
+  function sizedScale(id, k) {
+    const area = filterArea(id);
+    return area > 0 ? Math.min(k, Math.sqrt(WEBKIT_FILTER_PX / area)) : k;
+  }
+  // sprite id's largest filter region, in its units squared (worked out by svgOf)
+  function filterArea(id) {
+    const sp = sprites[id];
+    if (sp.filterArea == null) sp.text = svgOf(id);
+    return sp.filterArea;
+  }
+  // SVG text (of a drawing with box [x, y, w, h]) with its width and height for scale s: whole
+  // pixels, cw x ch, the viewBox grown by the rounding so that one unit is still s pixels. Drawn
+  // at (cw * k / s) x (ch * k / s), one unit comes out k pixels, as in bake().
+  function sizeText(text, box, s) {
+    const [x, y, w, h] = box;
+    const cw = Math.ceil(w * s - 1e-6), ch = Math.ceil(h * s - 1e-6);
+    return {
+      text: text.replace(/^<svg ([^>]*?)viewBox="[^"]*" width="[^"]*" height="[^"]*">/, '<svg $1viewBox="' + x + ' ' + y + ' ' + cw / s + ' ' + ch / s + '" width="' + cw + '" height="' + ch + '">'),
+      s, cw, ch,
+    };
+  }
+  const sizedText = (id, k) => sizeText(sprites[id].text || (sprites[id].text = svgOf(id)), sprites[id].box, sizedScale(id, k));
+  // Sprite id's sized SVG for a bitmap at k, loaded: {im, s, cw, ch, release()}, or null.
+  function sizedImage(id, k) {
+    const z = sizedText(id, k);
+    const u = URL.createObjectURL(new Blob([z.text], { type: 'image/svg+xml' }));
+    const im = new Image();
+    // WebKit keeps an SVG image's document and its filters' buffers for as long as the image
+    // lives: let go of it as soon as it is painted
+    const release = () => { im.onload = im.onerror = null; im.src = 'data:,'; URL.revokeObjectURL(u); };
+    return new Promise((resolve) => {
+      im.onload = () => resolve(im);
+      im.onerror = () => resolve(null);
+      im.src = u;
+    }).then((ok) => (ok && ok.decode ? ok.decode().then(() => ok, () => ok) : ok))
+      .then((ok) => { if (!ok) { release(); return null; } return { im, s: z.s, cw: z.cw, ch: z.ch, release }; });
+  }
   function toSvgMode() {
     if (mode === 'svg') return;
     mode = 'svg';
@@ -563,7 +705,8 @@ ${inkFilter('ke', s, r)}
       document.querySelectorAll('img[data-sprite]').forEach(ensureSvg);
     }
   }
-  // Paint one bitmap (synchronous). Returns an entry or null.
+  // Paint one bitmap (synchronous). Returns an entry or null. (svg: the sprite's loaded SVG image, or
+  // a sizedImage: drawn so that one sprite unit is k pixels either way)
   function bake(id, k, svg) {
     const sp = sprites[id];
     const w = sp.box[2], h = sp.box[3];
@@ -575,7 +718,8 @@ ${inkFilter('ke', s, r)}
       const cv = document.createElement('canvas');
       cv.width = cw; cv.height = ch;
       // default options: no willReadFrequently and no getImageData here, so the canvas can stay on the GPU
-      cv.getContext('2d').drawImage(svg, 0, 0, w * k, h * k);
+      if (svg.im) cv.getContext('2d').drawImage(svg.im, 0, 0, (svg.cw * k) / svg.s, (svg.ch * k) / svg.s);
+      else cv.getContext('2d').drawImage(svg, 0, 0, w * k, h * k);
       // toDataURL, not toBlob/convertToBlob: those wait for idle time (tens of seconds while frames are busy)
       d = cv.toDataURL('image/png');
       cv.width = cv.height = 0;
@@ -756,6 +900,9 @@ ${inkFilter('ke', s, r)}
     if (asyncReady) return asyncReady;
     asyncReady = (async () => {
       if (mode !== 'bitmap' || !tuning.async || typeof createImageBitmap !== 'function' || typeof document === 'undefined') return false;
+      // (Not where bitmaps are painted from sized SVGs: sizedCheck. WebKit makes the bitmap on the
+      // page's thread anyway, and the wrapper images in flight held several GB.)
+      if (await sizedCheck()) return false;
       try {
         const w = 60, h = 44, k = 1.493, cw = Math.ceil(w * k - 1e-6), ch = Math.ceil(h * k - 1e-6);
         const shapes = [
@@ -865,11 +1012,18 @@ ${inkFilter('ke', s, r)}
   const stillWanted = (job) => job.direct || job.by.some((r) => (r.tag ? r.tag.alive && !held : r.im.isConnected && ((r.prefetch && !held) || r.im._atWant === job.key)));
   async function runJob(job) {
     if (!stillWanted(job)) return null;
-    const svg = await svgImage(job.id);
-    if (mode !== 'bitmap') return null;
-    await nextTask();
-    if (mode !== 'bitmap' || !stillWanted(job)) return null;
-    const entry = bake(job.id, job.k, svg);
+    const sized = await sizedCheck();
+    if (sized && !stillWanted(job)) return null;
+    const svg = sized ? await sizedImage(job.id, job.k) : await svgImage(job.id);
+    let entry = null;
+    try {
+      if (mode !== 'bitmap') return null;
+      await nextTask();
+      if (mode !== 'bitmap' || !stillWanted(job)) return null;
+      entry = bake(job.id, job.k, svg);
+    } finally {
+      if (sized && svg) svg.release();
+    }
     if (!entry) { failed.add(job.key); return null; }
     await predecode(entry);
     return entry;
@@ -948,9 +1102,12 @@ ${inkFilter('ke', s, r)}
       // starts at once, so the first scene's big bitmaps are on their way before its imgs exist.
       selfCheck();
       asyncCheck();
+      // (a few ms, once: whether to paint from sized SVGs, and so on this thread, is known first)
+      await sizedCheck();
       await storeReady(); // (bitmaps stored on an earlier visit are used, not painted again)
       for (;;) {
-        const useAsync = asyncOk !== false && tuning.async && typeof createImageBitmap === 'function';
+        // (not where bitmaps are painted from sized SVGs: asyncCheck says no there too)
+        const useAsync = asyncOk !== false && !sizedNeed && tuning.async && typeof createImageBitmap === 'function';
         if (!queue.length) { if (!inflight && !loadingStored) break; await slot(); continue; }
         const i = pickLane();
         const job = queue[i];
@@ -1273,7 +1430,8 @@ ${inkFilter('ke', s, r)}
     // not painted ahead: the SVG is shown (or it is painted on the spot) during play
     if (!e) missed(id, kk, key, bucket === 8 ? 'tween' : bucket ? 'step' : 'exact');
     const cheap = estimate(id, kk) <= SYNC_MS, input = inInput();
-    if (!e && !failed.has(key) && !jobs.has(key) && cheap && svgReady.has(id) && !input && !stored(id, kk)) {
+    // (not where bitmaps are painted from sized SVGs, which take a load: sizedCheck)
+    if (!e && !failed.has(key) && !jobs.has(key) && cheap && sizedNeed === false && svgReady.has(id) && !input && !stored(id, kk)) {
       e = bake(id, kk, svgReady.get(id));
       if (e) { st.syncJobs++; store(e); }
     }
@@ -1531,6 +1689,7 @@ ${inkFilter('ke', s, r)}
   function warm() {
     if (mode !== 'bitmap') return;
     selfCheck();
+    sizedCheck();
     asyncCheck();
     storeReady();
   }
@@ -1961,7 +2120,7 @@ ${inkFilter('ke', s, r)}
     fit, idle, stats, cachedScales, cachedKeys, setSprite, shows, kOf, kPeak, deviceMatrix, rasterize, estimate, tweenStart, tweenEnd, spriteLog: spriteLogRows,
     sceneList, prefetchScene, idlePrefetch, play, warm, storeReady, persist, housekeep, showSvg, whenPainting, holdDecodes, lanes,
     sweep, audit, ready, cost, track, scaleChanged, resnapSoon, resized, hold, inexactToSvg,
-    C, E, R, smooth, blob, fluff, puffs, star, heart, line, rng, group, inkPad: INK_PAD,
+    C, E, R, smooth, blob, fluff, puffs, star, heart, line, rng, group, inkPad: INK_PAD, pathBox, filterArea, get sized() { return sizedNeed; },
     mix, inkOf, shade, tint, SEPIA,
   };
 })();

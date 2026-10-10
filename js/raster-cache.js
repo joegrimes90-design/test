@@ -35,7 +35,7 @@ window.AT = window.AT || {};
 
 AT.rasterCache = (() => {
   const DB_NAME = 'atticus-raster';
-  const CACHE_VERSION = 1;
+  const CACHE_VERSION = 2; // 2: WebKit paints from SVGs sized to the bitmap (js/art-core.js sizedCheck)
   const OPEN_MS = 400;          // give up on IndexedDB if it has not opened by then
   const LOAD_MS = 1500;         // ... or if reading the records takes longer than this
   const MAX_BYTES = 150 * 1048576;
