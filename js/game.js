@@ -24,6 +24,8 @@
     const info = lineInfo(id);
     const dur = AT.audio.voice(id);
     voiceEnd = E.time + dur;
+    // the narrator speaking: a moment where bitmaps painted on the page's thread can hold it up (AT.art.calm)
+    if (info.s === 'N' && live() && dur > 0) AT.art.calm((dur * 1000) / (E.speed || 1));
     showCaption(info.t, info.s);
     const speaker = who || AT.cast[info.s];
     if (speaker && speaker.talk) speaker.talk(dur);
@@ -197,6 +199,8 @@
       if (current()) {
         E.hold('preview', false);
         AT.art.lanes(false);
+        // (where its manifest waits until it is played: asked for again, in case a resize let go of it)
+        if (AT.art.serial) AT.art.prefetchScene(name);
         mark(`at:live:${name}`);
         shown(name);
       }
@@ -347,7 +351,12 @@
       }
       mark('at:refit');
       if (done) done();
-      if (!going && AT.sceneName) AT.art.idlePrefetch(AT.sceneName);
+      if (!going && AT.sceneName) {
+        // (a pending refit lets go of the manifest's prefetches: where they wait for moments to be painted
+        // in, they are asked for again at the new size)
+        if (AT.art.serial && !previewing) AT.art.prefetchScene(AT.sceneName);
+        AT.art.idlePrefetch(AT.sceneName);
+      }
     }
   }
 

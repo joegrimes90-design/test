@@ -20,12 +20,14 @@ import { launchWebKit, webkitMissing } from '../helpers/webkit.mjs';
 const missing = webkitMissing();
 const SCENES = ['hub', 'potty', 'teeth', 'baby', 'tv', 'party'];
 // measured (WebKitGTK 2.52, CPU renderer, 4 cores, 1280x720 at 2x): the content process stays at
-// 0.5-1.5 GB, and the slowest scene (potty, first visit, its two backgrounds and close-ups painted
-// behind the cover) is shown 13-15 s after AT.go, the second time round about 1 s. With a region per
-// sprite it reached 6.3 GB (this test fails there), and passed 8 GB and crashed in earlier runs;
-// painting from the 1x SVGs (?sized=0, soft) it reached 4.8 GB.
+// 0.5-1.6 GB, and the slowest scene (potty, first visit, both its backgrounds painted behind the cover:
+// played straight from AT.go, nothing was painted in the title's narration) is shown 5.7-6.6 s after
+// AT.go, the second time round 1-3 s (13-15 s for potty before its manifest stopped holding the cover
+// up and PNGs were encoded by the worker). With a region per sprite it reached 6.3 GB (this test fails
+// there), and passed 8 GB and crashed in earlier runs; painting from the 1x SVGs (?sized=0, soft) it
+// reached 4.8 GB. (tests/webkit/cold.test.mjs times first visits played as a child plays them.)
 const MAX_MB = 3000;
-const MAX_SHOWN_MS = 40000;
+const MAX_SHOWN_MS = 15000;
 
 test('WebKit at 2x: every scene twice over on the real clock, within memory and time', { skip: missing || false, timeout: 900000 }, async (t) => {
   const wk = await launchWebKit({ width: 1280, height: 720, scale: 2 });

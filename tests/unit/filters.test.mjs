@@ -247,7 +247,10 @@ test('every ink (userSpaceOnUse) filter region is its own line\'s box plus the f
       const [wob, , blur] = INK[fid.replace(/_.*/, '')];
       const box = bboxOf(el); // the stroke's outline, its width included (arcs sampled)
       // all of what the filter can draw of the line, so no line is cut off (or the old edge)...
-      const need = intersect(grow(box, wob / 2 + 3 * blur), OLD);
+      // (drawn in the sprite's own coordinates, the line is cut at A.inkPad outside its viewBox: nothing
+      // there is seen, and nothing inside depends on it)
+      let need = intersect(grow(box, wob / 2 + 3 * blur), OLD);
+      if (isIdentity(ctm)) need = intersect(need, grow(viewBox, A.inkPad));
       if (need[2] && need[3] && !within(need, r)) bad.push(`${what}: region ${r.join(' ')} cuts off the line (${need.map(Math.round).join(' ')})`);
       // ...and not much more: WebKit allocates the whole region for every filter step of every line
       const most = grow(bboxOf(el, true), wob + 3 * blur + 5);
@@ -259,6 +262,80 @@ test('every ink (userSpaceOnUse) filter region is its own line\'s box plus the f
   // the transformed strokes (mirrored leg, teddy's tilted arms) were found, each with a filter for its own user space
   assert.ok(transformed >= 3, `${transformed} transformed ink strokes`);
   assert.ok(spriteWide <= 30, `${spriteWide} ink elements with a sprite-wide region`);
+});
+
+// The washes' default region is 150% of the shape's box each way (objectBoundingBox -25%..125%): for a
+// background's wall, sky and floor that is 2-3 times the visible picture, and WebKit computes every filter
+// step over all of it. js/art-core.js washRegion brings a big shape's sides in, as fractions of the same box
+// the browser uses (the exact outline's: Skia's tight bounds, in Chromium and WebKit alike), to a pad from
+// the shape and, for a shape in the sprite's own coordinates, from the sprite's box. Never past the default
+// (where it crops what the filter draws, it must crop the same), and always holding everything a pixel
+// that can be seen depends on: the displacement moves the shape by up to half its scale, the rim's blur
+// reads three radii further and the displaced shape another half scale, the last blur a pixel or two
+// (pixels compared old vs new in Chromium and WebKit: bit for bit).
+const WASH = { w: [9, 3.2], ws: [3, 1.6], t: [8, 3], bg: [22, 7] }; // displacement scale, rim blur (js/art-core.js WASH)
+const washReach = (fx) => WASH[fx][0] + 3 * WASH[fx][1] + 2;
+// points along path data (cubics and arcs sampled), for checking the engine's exact boxes
+function samples(d) {
+  const toks = d.match(/[a-zA-Z]|-?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?/g);
+  let i = 0, cmd = '', x = 0, y = 0, sx = 0, sy = 0;
+  const pts = [];
+  const num = () => +toks[i++];
+  while (i < toks.length) {
+    if (/[a-zA-Z]/.test(toks[i])) cmd = toks[i++];
+    const rel = cmd === cmd.toLowerCase(), C = cmd.toUpperCase(), ox = rel ? x : 0, oy = rel ? y : 0;
+    if (C === 'Z') { x = sx; y = sy; continue; }
+    if (C === 'M' || C === 'L') { x = ox + num(); y = oy + num(); if (C === 'M') { sx = x; sy = y; cmd = rel ? 'l' : 'L'; } pts.push([x, y]); }
+    else if (C === 'H') { x = ox + num(); pts.push([x, y]); }
+    else if (C === 'V') { y = oy + num(); pts.push([x, y]); }
+    else if (C === 'C') {
+      const p = [x, y, ox + num(), oy + num(), ox + num(), oy + num(), ox + num(), oy + num()];
+      for (let k = 0; k <= 200; k++) { const t = k / 200, u = 1 - t; pts.push([u * u * u * p[0] + 3 * u * u * t * p[2] + 3 * u * t * t * p[4] + t * t * t * p[6], u * u * u * p[1] + 3 * u * u * t * p[3] + 3 * u * t * t * p[5] + t * t * t * p[7]]); }
+      x = p[6]; y = p[7];
+    } else if (C === 'A') {
+      const rx = num(), ry = num(), phi = num(), fa = num(), fs = num(), nx = ox + num(), ny = oy + num();
+      pts.push(...arcPoints(x, y, rx, ry, phi, fa, fs, nx, ny));
+      x = nx; y = ny;
+    } else return null;
+  }
+  return pts;
+}
+
+test('every wash filter region stays within the default and holds all that a visible pixel depends on', (t) => {
+  const bad = [];
+  let clipped = 0, saved = 0, total = 0, tight = 0;
+  for (const { id, viewBox, filters, uses } of sprites) {
+    for (const { el, id: fid } of uses) {
+      const fx = /^(w|ws|t|bg)(?:_c\d+)?$/.exec(fid);
+      if (!fx || el.name !== 'path') continue;
+      const f = filters[fid].attrs;
+      const b = A.pathBox(el.attrs.d, true);
+      const pts = samples(el.attrs.d);
+      if (!b || !pts) { if (fid !== fx[1]) bad.push(`${id}: #${fid} on a path without an exact box`); continue; }
+      // the engine's exact box: the sampled outline, and nothing more
+      tight++;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const [px, py] of pts) { x0 = Math.min(x0, px); y0 = Math.min(y0, py); x1 = Math.max(x1, px); y1 = Math.max(y1, py); }
+      const sb = [x0, y0, x1 - x0, y1 - y0];
+      if (!(b[0] <= sb[0] + 1e-6 && b[1] <= sb[1] + 1e-6 && b[2] >= sb[0] + sb[2] - 1e-6 && b[3] >= sb[1] + sb[3] - 1e-6)) bad.push(`${id}: box ${b} misses the outline ${sb}`);
+      if (!(b[0] >= sb[0] - 0.05 && b[1] >= sb[1] - 0.05 && b[2] <= sb[0] + sb[2] + 0.05 && b[3] <= sb[1] + sb[3] + 0.05)) bad.push(`${id}: box ${b} is not tight (${sb})`);
+      const bw = b[2] - b[0], bh = b[3] - b[1];
+      const frac = (v, dflt) => (v == null ? dflt : v.endsWith('%') ? parseFloat(v) / 100 : +v);
+      const r = [b[0] + frac(f.x, -0.1) * bw, b[1] + frac(f.y, -0.1) * bh, frac(f.width, 1.2) * bw, frac(f.height, 1.2) * bh];
+      const dflt = [b[0] - 0.25 * bw, b[1] - 0.25 * bh, 1.5 * bw, 1.5 * bh];
+      total += dflt[2] * dflt[3];
+      saved += dflt[2] * dflt[3] - r[2] * r[3];
+      if (fid !== fx[1]) clipped++;
+      const what = `${id}: #${fid} on <path${el.attrs.transform ? ' transform="' + el.attrs.transform + '"' : ''}>`;
+      if (!within(r, dflt, 1e-6 * Math.max(bw, bh))) bad.push(`${what}: region ${r.map(Math.round)} leaves the default ${dflt.map(Math.round)}`);
+      let need = intersect(grow([b[0], b[1], bw, bh], washReach(fx[1])), dflt);
+      if (isIdentity(ctmOf(el))) need = intersect(need, grow(viewBox, washReach(fx[1])));
+      if (need[2] > 0 && need[3] > 0 && !within(need, r, 1e-6)) bad.push(`${what}: region ${r.map((v) => v.toFixed(1))} cuts into what it needs (${need.map((v) => v.toFixed(1))})`);
+    }
+  }
+  t.diagnostic(`${clipped} wash regions brought in, ${(100 * saved / total).toFixed(0)}% of the washes' filter area gone (${tight} shapes with exact boxes)`);
+  assert.deepEqual(bad, []);
+  assert.ok(clipped > 50, `${clipped} wash regions brought in`);
 });
 
 test('the ink filters of the biggest sprites cost a fraction of what whole-sprite regions did', (t) => {

@@ -82,6 +82,23 @@
     }
     return { rows: out, sized: AT.art.sized, mode: AT.art.mode };
   };
+  // Each sprite's bitmap at scale k as the bitmap layer makes it (where it paints on the page's thread, the PNG
+  // is encoded by a worker: js/art-core.js encodeOff) and the same painting encoded here with toDataURL, both
+  // decoded the same way: [{id, w, h, differ}] (differ: bytes of the RGBA pixels that are not the same).
+  window.encoded = async function (ids, k) {
+    var load = function (u) { return new Promise(function (ok, no) { var im = new Image(); im.onload = function () { ok(im); }; im.onerror = no; im.src = u; }); };
+    var pixels = function (im, w, h) { var c = document.createElement('canvas'); c.width = w; c.height = h; var g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(im, 0, 0); return g.getImageData(0, 0, w, h).data; };
+    var out = [];
+    for (var i = 0; i < ids.length; i++) {
+      var e = await AT.art.rasterize(ids[i], k);
+      var cv = await AT.art.paintCanvas(ids[i], k);
+      var a = pixels(await load(e.url), e.cw, e.ch), b = pixels(await load(cv.toDataURL('image/png')), e.cw, e.ch), n = 0;
+      for (var j = 0; j < a.length; j++) if (a[j] !== b[j]) n++;
+      out.push({ id: ids[i], w: e.cw, h: e.ch, cw: cv.width, ch: cv.height, differ: n });
+    }
+    var log = AT.art.bakeLog();
+    return { rows: out, off: log.filter(function (x) { return x.off; }).length, painted: log.length };
+  };
   window.__ready = true;
 </script>
 </body>

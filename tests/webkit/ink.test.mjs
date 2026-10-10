@@ -197,3 +197,24 @@ test('WebKit: bitmaps at k = 2 are painted at that resolution, not magnified fro
     await wk.close();
   }
 });
+
+// WebKit paints every bitmap on the page's thread, and PNG-encoding it there was about a quarter of the
+// time (a second for a background at 2x): the canvas is handed to the encoder worker instead
+// (createImageBitmap of it, encoded with OffscreenCanvas.convertToBlob), while the next sprite is painted.
+// The PNG must hold the very pixels toDataURL would have.
+test('WebKit: bitmaps PNG-encoded by the worker hold the pixels toDataURL gives', { skip: missing || false, timeout: 600000 }, async (t) => {
+  const ids = ['at_mouth_smile', 'mm_eyes_open', 'star', 'toothbrush', 'thought', 'bg_bathroom'];
+  const wk = await launchWebKit({ width: 1280, height: 720, scale: 1 });
+  try {
+    await wk.goto('/tests/webkit/sprites.html');
+    await wk.waitFor('return window.__ready === true && !!(window.AT && AT.art)');
+    const r = await wk.execAsync('return await window.encoded(arguments[0], arguments[1]);', ids, 2);
+    t.diagnostic(r.rows.map((x) => `${x.id} ${x.w}x${x.h}: ${x.differ} bytes differ`).join(', '));
+    assert.equal(r.off, r.painted, 'every bitmap encoded off the page\'s thread');
+    assert.ok(r.painted >= ids.length, `${r.painted} painted`);
+    for (const x of r.rows) assert.ok(x.cw === x.w && x.ch === x.h, `${x.id}: canvas ${x.cw}x${x.ch}, bitmap ${x.w}x${x.h}`);
+    assert.deepEqual(r.rows.filter((x) => x.differ).map((x) => `${x.id}: ${x.differ}`), []);
+  } finally {
+    await wk.close();
+  }
+});

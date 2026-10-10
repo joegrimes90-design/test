@@ -152,7 +152,8 @@ AT.art = (() => {
   // outlines; null when the data can't be read.)
   // An SVG arc's whole ellipse, from its end point parameters (SVG 1.1 F.6.5, radii scaled up
   // when too small for the chord), passed to add(x, y, 0) as the corners of its box.
-  function arcBox(x1, y1, rx, ry, phi, fa, fs, x2, y2, add) {
+  // (tight: only the part of the ellipse the arc sweeps, exactly)
+  function arcBox(x1, y1, rx, ry, phi, fa, fs, x2, y2, add, tight) {
     rx = Math.abs(rx); ry = Math.abs(ry);
     add(x1, y1); add(x2, y2);
     if (!rx || !ry) return;
@@ -165,11 +166,40 @@ AT.art = (() => {
     const co = Math.sqrt(Math.max(0, num / (rx * rx * yp * yp + ry * ry * xp * xp))) * (+fa === +fs ? -1 : 1);
     const cxp = (co * rx * yp) / ry, cyp = (-co * ry * xp) / rx;
     const ecx = c * cxp - sn * cyp + (x1 + x2) / 2, ecy = sn * cxp + c * cyp + (y1 + y2) / 2;
-    const hx = Math.hypot(rx * c, ry * sn), hy = Math.hypot(rx * sn, ry * c);
-    add(ecx - hx, ecy - hy); add(ecx + hx, ecy + hy);
+    if (!tight) {
+      const hx = Math.hypot(rx * c, ry * sn), hy = Math.hypot(rx * sn, ry * c);
+      add(ecx - hx, ecy - hy); add(ecx + hx, ecy + hy);
+      return;
+    }
+    // the sweep from t1 by dt (SVG 1.1 F.6.5), and the angles where x or y is at an extreme
+    const ang = (ux, uy, vx, vy) => Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy);
+    const t1 = ang(1, 0, (xp - cxp) / rx, (yp - cyp) / ry);
+    let dt = ang((xp - cxp) / rx, (yp - cyp) / ry, (-xp - cxp) / rx, (-yp - cyp) / ry);
+    if (!+fs && dt > 0) dt -= 2 * Math.PI;
+    if (+fs && dt < 0) dt += 2 * Math.PI;
+    const tx = Math.atan2(-ry * sn, rx * c), ty = Math.atan2(ry * c, rx * sn);
+    for (const t of [tx, tx + Math.PI, ty, ty + Math.PI]) {
+      // (is t within the sweep?)
+      let u = ((t - t1) * Math.sign(dt || 1)) % (2 * Math.PI);
+      if (u < 0) u += 2 * Math.PI;
+      if (u <= Math.abs(dt)) add(ecx + rx * Math.cos(t) * c - ry * Math.sin(t) * sn, ecy + rx * Math.cos(t) * sn + ry * Math.sin(t) * c);
+    }
+  }
+  // the extremes of a cubic Bezier from p0 to p3 along one axis, within the segment (0 < t < 1)
+  function cubicExtremes(p0, p1, p2, p3) {
+    const a = -p0 + 3 * p1 - 3 * p2 + p3, b = 2 * (p0 - 2 * p1 + p2), c = p1 - p0;
+    const ts = [];
+    if (Math.abs(a) < 1e-12) { if (Math.abs(b) > 1e-12) ts.push(-c / b); }
+    else {
+      const disc = b * b - 4 * a * c;
+      if (disc >= 0) { const q = Math.sqrt(disc); ts.push((-b + q) / (2 * a), (-b - q) / (2 * a)); }
+    }
+    return ts.filter((t) => t > 0 && t < 1).map((t) => { const u = 1 - t; return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3; });
   }
   const PATH_ARGS = { M: 2, L: 2, H: 1, V: 1, C: 6, S: 4, Q: 4, T: 2, A: 7, Z: 0 };
-  function pathBox(d) {
+  // (tight: the exact box of the outline, as the browsers' objectBoundingBox is; null for path data
+  // with S, Q or T, which no drawing uses)
+  function pathBox(d, tight) {
     const tok = d.match(/[A-Za-z]|[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/g) || [];
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, cx = 0, cy = 0, sx = 0, sy = 0, i = 0, cmd = '';
     const add = (x, y, r) => { r = r || 0; x0 = Math.min(x0, x - r); y0 = Math.min(y0, y - r); x1 = Math.max(x1, x + r); y1 = Math.max(y1, y + r); };
@@ -178,6 +208,7 @@ AT.art = (() => {
       const U = cmd.toUpperCase(), rel = cmd !== U, n = PATH_ARGS[U];
       if (n === undefined) return null;
       if (U === 'Z') { cx = sx; cy = sy; continue; }
+      if (tight && (U === 'S' || U === 'Q' || U === 'T')) return null;
       const v = tok.slice(i, i + n).map(Number);
       i += n;
       if (v.length < n || v.some(isNaN)) return null;
@@ -186,8 +217,14 @@ AT.art = (() => {
       else if (U === 'V') { cy = v[0] + oy; add(cx, cy); }
       else if (U === 'A') {
         const nx = v[5] + ox, ny = v[6] + oy;
-        arcBox(cx, cy, v[0], v[1], v[2], v[3], v[4], nx, ny, add);
+        arcBox(cx, cy, v[0], v[1], v[2], v[3], v[4], nx, ny, add, tight);
         cx = nx; cy = ny;
+      } else if (U === 'C' && tight) {
+        const x1 = v[0] + ox, y1 = v[1] + oy, x2 = v[2] + ox, y2 = v[3] + oy, x3 = v[4] + ox, y3 = v[5] + oy;
+        add(x3, y3);
+        for (const x of cubicExtremes(cx, x1, x2, x3)) add(x, cy);
+        for (const y of cubicExtremes(cy, y1, y2, y3)) add(cx, y);
+        cx = x3; cy = y3;
       } else { for (let j = 0; j < n; j += 2) add(v[j] + ox, v[j + 1] + oy); cx = v[n - 2] + ox; cy = v[n - 1] + oy; }
       if (U === 'M') { sx = cx; sy = cy; cmd = rel ? 'l' : 'L'; }
     }
@@ -197,14 +234,62 @@ AT.art = (() => {
   // user space (its transform included, so a transformed line needs nothing more): its bounding
   // box plus how far the filter can reach from it (half the width, the displacement, three blur
   // radii) and 4 units of slack, rounded out to whole units; null: the sprite's box will do.
-  function inkBox(kf, d, sw) {
+  // (clip: the sprite's box, when the line is drawn in its coordinates: what the filter draws beyond
+  // INK_PAD outside it is never seen, and no pixel inside depends on it)
+  function inkBox(kf, d, sw, clip) {
     const b = pathBox(d);
     if (!b) return null;
     const [wob, , blur] = INK[kf];
     const pad = sw / 2 + wob + 3 * blur + 4;
-    return inkRegion(Math.floor(b[0] - pad), Math.floor(b[1] - pad), Math.ceil(b[2] + pad), Math.ceil(b[3] + pad));
+    let x0 = Math.floor(b[0] - pad), y0 = Math.floor(b[1] - pad), x1 = Math.ceil(b[2] + pad), y1 = Math.ceil(b[3] + pad);
+    if (clip) {
+      const c = [Math.max(x0, Math.floor(clip[0] - INK_PAD)), Math.max(y0, Math.floor(clip[1] - INK_PAD)), Math.min(x1, Math.ceil(clip[0] + clip[2] + INK_PAD)), Math.min(y1, Math.ceil(clip[1] + clip[3] + INK_PAD))];
+      // (a line wholly outside keeps its own box)
+      if (c[0] < c[2] && c[1] < c[3]) [x0, y0, x1, y1] = c;
+    }
+    return inkRegion(x0, y0, x1, y1);
   }
-  let inkTf = null; // while svgOf draws a sprite: {seed, ids: {kf + region: id}, out: filters, area, det}
+  // The watercolour washes' filter region. By default it is 150% of the shape's bounding box each way
+  // (objectBoundingBox -25%..125%), far more than the filter reaches for a big shape: WebKit computes
+  // every filter step over the whole region, and for a background's wall, floor and sky that was 2-3
+  // times the visible picture (the outer parts never seen). So each side of a big shape's region is
+  // brought in to WASH_PAD from the shape, and from the sprite's box when the shape is drawn in its
+  // coordinates. The pad holds what the filter can draw beyond the shape (its displacement, the soft
+  // halo) and everything a pixel within it depends on (the rim's blur of the displaced shape, which
+  // reads the shape a displacement further on: about 45 units for bg, 20 for the others), so every
+  // pixel that can be seen comes out the same (bit for bit in Chromium and WebKit: measured on every
+  // sprite). Per axis, both sides or neither: a side left at its default stays the exact -25% / 150%
+  // the browser works out, and the others are fractions of the same box, never past the default.
+  // [x, w, y, h] as fractions of the box (null: that axis as it was), or null (the default region).
+  const WASH_PAD = { w: 32, ws: 32, t: 32, bg: 64 };
+  function washRegion(fx, d, clip) {
+    const b = pathBox(d, true);
+    if (!b) return null;
+    const P = WASH_PAD[fx];
+    const axis = (lo, hi, c0, c1) => {
+      const len = hi - lo;
+      if (!(len > 0)) return null;
+      const o0 = lo - 0.25 * len, o1 = hi + 0.25 * len;
+      let n0 = Math.max(o0, lo - P), n1 = Math.min(o1, hi + P);
+      if (clip) { n0 = Math.max(n0, c0 - P); n1 = Math.min(n1, c1 + P); }
+      if (!(n0 > o0 + 0.5 && n1 < o1 - 0.5 && n1 > n0)) return null;
+      return [(n0 - lo) / len, (n1 - n0) / len];
+    };
+    const ax = axis(b[0], b[2], clip && clip[0], clip && clip[0] + clip[2]);
+    const ay = axis(b[1], b[3], clip && clip[1], clip && clip[1] + clip[3]);
+    return ax || ay ? { ax, ay, w: b[2] - b[0], h: b[3] - b[1] } : null;
+  }
+  // the id of a wash filter (kind fx) with region r (washRegion), in this sprite's defs
+  function washFilterAt(fx, r) {
+    const attrs = (r.ax ? `x="${r.ax[0]}"` : 'x="-25%"') + (r.ay ? ` y="${r.ay[0]}"` : ' y="-25%"') + (r.ax ? ` width="${r.ax[1]}"` : ' width="150%"') + (r.ay ? ` height="${r.ay[1]}"` : ' height="150%"');
+    const key = fx + ' ' + attrs;
+    if (inkTf.wash[key]) return inkTf.wash[key];
+    const id = fx + '_c' + Object.keys(inkTf.wash).length;
+    inkTf.out += washFilter(id, inkTf.seed, WASH[fx], attrs);
+    inkTf.wash[key] = id;
+    return id;
+  }
+  let inkTf = null; // while svgOf draws a sprite: {seed, ids: {kf + region: id}, wash: {fx + region: id}, out: filters, area, det, box, nested}
   // the id of an ink filter with region r (one per region and kind, in this sprite's defs)
   function inkFilterAt(kf, r) {
     const key = kf + ' ' + r.join(',');
@@ -214,12 +299,10 @@ AT.art = (() => {
     inkTf.ids[key] = id;
     return id;
   }
-  function defs(seed, box) {
-    const key = seed + '|' + box.join(',');
-    if (defsCache[key]) return defsCache[key];
-    const s = seed;
-    const wash = (id, freq, wob, rim, varAmt, base) => `
-<filter id="${id}" x="-25%" y="-25%" width="150%" height="150%" color-interpolation-filters="sRGB">
+  // the washes: [baseFrequency, displacement, rim blur, pigment variation, paper underlay]
+  const WASH = { w: [0.022, 9, 3.2, 0.22, true], ws: [0.05, 3, 1.6, 0.18, true], t: [0.022, 8, 3, 0.32, false], bg: [0.008, 22, 7, 0.3, false] };
+  const washFilter = (id, s, [freq, wob, rim, varAmt, base], region) => `
+<filter id="${id}" ${region || 'x="-25%" y="-25%" width="150%" height="150%"'} color-interpolation-filters="sRGB">
 <feTurbulence type="fractalNoise" baseFrequency="${freq}" numOctaves="2" seed="${s}" result="n"/>
 <feDisplacementMap in="SourceGraphic" in2="n" scale="${wob}" xChannelSelector="R" yChannelSelector="G" result="d"/>
 <feTurbulence type="fractalNoise" baseFrequency="0.016" numOctaves="2" seed="${s + 11}" result="m"/>
@@ -235,12 +318,16 @@ ${base ? `<feFlood flood-color="#fffaf1" result="p"/><feComposite in="p" in2="d"
 <feMerge result="mm"><feMergeNode in="ha"/>${base ? '<feMergeNode in="pb"/>' : ''}<feMergeNode in="o"/></feMerge>
 <feGaussianBlur in="mm" stdDeviation="0.45"/>
 </filter>`;
+  function defs(seed, box) {
+    const key = seed + '|' + box.join(',');
+    if (defsCache[key]) return defsCache[key];
+    const s = seed;
     const r = inkRegion(box[0] - INK_PAD, box[1] - INK_PAD, box[0] + box[2] + INK_PAD, box[1] + box[3] + INK_PAD);
     const out = `<defs>
-${wash('w', 0.022, 9, 3.2, 0.22, true)}
-${wash('ws', 0.05, 3, 1.6, 0.18, true)}
-${wash('t', 0.022, 8, 3, 0.32, false)}
-${wash('bg', 0.008, 22, 7, 0.3, false)}
+${washFilter('w', s, WASH.w)}
+${washFilter('ws', s, WASH.ws)}
+${washFilter('t', s, WASH.t)}
+${washFilter('bg', s, WASH.bg)}
 ${inkFilter('k', s, r)}
 ${inkFilter('ks', s, r)}
 ${inkFilter('ke', s, r)}
@@ -257,12 +344,17 @@ ${inkFilter('ke', s, r)}
     const tf = s.tf ? ` transform="${s.tf}"` : '';
     let out = '';
     const fx = s.fx || 'w';
+    // (the sprite's box, for a shape drawn in its coordinates)
+    const clip = inkTf && !s.tf && !inkTf.nested ? inkTf.box : null;
     if (s.f && s.f !== 'none') {
-      const flt = fx === 'flat' ? '' : ` filter="url(#${fx})"`;
+      let flt = fx === 'flat' ? '' : ` filter="url(#${fx})"`;
       const op = s.o != null ? ` opacity="${s.o}"` : '';
+      const wr = flt && inkTf && WASH[fx] ? washRegion(fx, s.d, clip) : null;
+      if (wr) flt = ` filter="url(#${washFilterAt(fx, wr)})"`;
       out += `<path d="${s.d}" fill="${s.f}"${flt}${op}${tf}/>`;
-      // (its filter region: 150% of its box each way)
-      if (flt && inkTf) { const b = pathBox(s.d); if (b) inkTf.area = Math.max(inkTf.area, 2.25 * (b[2] - b[0]) * (b[3] - b[1]) * inkTf.det * detOf(s.tf)); }
+      // (its filter region: 150% of its box each way, or what washRegion leaves of it)
+      // (of the box with control points: a superset of the outline's, on the safe side for sizedScale)
+      if (flt && inkTf) { const b = pathBox(s.d); if (b) inkTf.area = Math.max(inkTf.area, (wr && wr.ax ? wr.ax[1] : 1.5) * (b[2] - b[0]) * (wr && wr.ay ? wr.ay[1] : 1.5) * (b[3] - b[1]) * inkTf.det * detOf(s.tf)); }
     }
     const k = s.k === undefined ? (s.f && s.f !== 'none' ? inkOf(s.f) : SEPIA) : s.k;
     if (k) {
@@ -273,7 +365,7 @@ ${inkFilter('ke', s, r)}
       // each line gets an ink filter whose region is its own box (inkBox); outside svgOf, and
       // for path data it can't read, the sprite-wide one from defs (a transformed line filtered
       // from an untransformed wrapping group, so that region stays in the sprite's coordinates)
-      const r = inkTf && inkBox(kf, s.d, sw);
+      const r = inkTf && inkBox(kf, s.d, sw, clip);
       if (r) {
         out += `${stroke} filter="url(#${inkFilterAt(kf, r)})"${ko}${tf}/>`;
         inkTf.area = Math.max(inkTf.area, r[2] * r[3] * inkTf.det * detOf(s.tf));
@@ -285,11 +377,11 @@ ${inkFilter('ke', s, r)}
   }
   function group(shapes, tf) {
     const det = inkTf && inkTf.det;
-    if (inkTf) inkTf.det = det * detOf(tf);
+    if (inkTf) { inkTf.det = det * detOf(tf); inkTf.nested++; }
     try {
       return { raw: `<g transform="${tf}">${flat(shapes).map(shapeSvg).join('')}</g>` };
     } finally {
-      if (inkTf) inkTf.det = det;
+      if (inkTf) { inkTf.det = det; inkTf.nested--; }
     }
   }
   // how much a transform attribute scales areas
@@ -319,7 +411,7 @@ ${inkFilter('ke', s, r)}
     if (!sp) throw new Error('No sprite ' + id);
     const [x, y, w, h] = sp.box;
     // (area: the largest filter region, in sprite units squared: see sizedScale)
-    const tfInk = (inkTf = { seed: sp.seed, ids: {}, out: '', area: 0, det: 1 });
+    const tfInk = (inkTf = { seed: sp.seed, ids: {}, wash: {}, out: '', area: 0, det: 1, box: sp.box, nested: 0 });
     let body;
     try {
       body = flat([sp.draw()]).map(shapeSvg).join('');
@@ -429,6 +521,8 @@ ${inkFilter('ke', s, r)}
   let running = false, flushQueued = false, busy = 0, useClock = 0;
   let held = false; // a resize refit is pending: sweeps and ratchets wait for it (js/game.js)
   let learnMs = 0, learnPx = 0; // for cost estimates: ms per device pixel of finished jobs
+  let learnBigMs = 0, learnBigPx = 0; // (painting the big ones on this thread: serialCost)
+  let learnEncMs = 0, learnEncPx = 0; // (PNG-encoding on this thread: serialCost)
   const later = typeof queueMicrotask === 'function' ? queueMicrotask : (fn) => Promise.resolve().then(fn);
   const dpr = () => (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
   const keyOf = (id, k) => `${id}@${k.toFixed(3)}`;
@@ -450,8 +544,9 @@ ${inkFilter('ke', s, r)}
     chan.port2.postMessage(0);
   });
 
+  // (parked: only jobs waiting for a moment to be painted in, in live play on one thread: serialPick)
   function checkIdle() {
-    if (running || queue.length || busy || pendingFit.size || flushQueued || dirtyQueued || snapQueued) return;
+    if (((running || queue.length) && !(parked && !inflight)) || busy || pendingFit.size || flushQueued || dirtyQueued || snapQueued) return;
     while (idleWaiters.length) idleWaiters.shift()();
   }
   // Resolves when nothing is queued or being painted and every requested bitmap has been put in its img.
@@ -708,21 +803,36 @@ ${inkFilter('ke', s, r)}
   // Paint one bitmap (synchronous). Returns an entry or null. (svg: the sprite's loaded SVG image, or
   // a sizedImage: drawn so that one sprite unit is k pixels either way)
   function bake(id, k, svg) {
+    const p = paint(id, k, svg);
+    return p && encodeHere(id, k, p);
+  }
+  // The drawing half of bake(): a canvas with the sprite painted at k, {cv, cw, ch, t0, ms}, or null.
+  function paint(id, k, svg) {
     const sp = sprites[id];
     const w = sp.box[2], h = sp.box[3];
     const cw = Math.ceil(w * k - 1e-6), ch = Math.ceil(h * k - 1e-6);
     if (!svg || cw < 1 || ch < 1 || cw * ch > MAX_PX) { st.svgFallbacks++; return null; }
     const t0 = performance.now();
-    let d;
     try {
       const cv = document.createElement('canvas');
       cv.width = cw; cv.height = ch;
       // default options: no willReadFrequently and no getImageData here, so the canvas can stay on the GPU
       if (svg.im) cv.getContext('2d').drawImage(svg.im, 0, 0, (svg.cw * k) / svg.s, (svg.ch * k) / svg.s);
       else cv.getContext('2d').drawImage(svg, 0, 0, w * k, h * k);
-      // toDataURL, not toBlob/convertToBlob: those wait for idle time (tens of seconds while frames are busy)
-      d = cv.toDataURL('image/png');
-      cv.width = cv.height = 0;
+      return { cv, cw, ch, t0, ms: performance.now() - t0 };
+    } catch (e) {
+      if (e && e.name === 'SecurityError') toSvgMode();
+      st.svgFallbacks++;
+      return null;
+    }
+  }
+  // The encoding half, on this thread: the canvas's PNG (toDataURL, not toBlob/convertToBlob: those wait
+  // for idle time in Chromium, tens of seconds while frames are busy).
+  function encodeHere(id, k, p) {
+    let d;
+    try {
+      d = p.cv.toDataURL('image/png');
+      p.cv.width = p.cv.height = 0;
     } catch (e) {
       if (e && e.name === 'SecurityError') toSvgMode();
       st.svgFallbacks++;
@@ -732,9 +842,30 @@ ${inkFilter('ke', s, r)}
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     const blob = new Blob([bytes], { type: 'image/png' });
-    const ms = performance.now() - t0;
-    learnMs += ms; learnPx += cw * ch;
-    return makeEntry(id, k, cw, ch, blob, ms);
+    // (painting and encoding, without the time a deferred canvas waited in between: encodeLater)
+    p.encMs = performance.now() - p.t0 - p.ms - (p.waited || 0);
+    const ms = p.ms + p.encMs;
+    learnMs += ms; learnPx += p.cw * p.ch;
+    if (p.cw * p.ch > BIG_PX) { learnBigMs += p.ms; learnBigPx += p.cw * p.ch; }
+    learnEncMs += p.encMs; learnEncPx += p.cw * p.ch;
+    return makeEntry(id, k, p.cw, p.ch, blob, ms);
+  }
+  // Where bitmaps are painted from sized SVGs (WebKit), on this thread one at a time, PNG-encoding is
+  // about a quarter of a bitmap's cost (a second for a background at 2x): there the canvas is handed to
+  // the encoder worker (createImageBitmap of the canvas: a copy of its pixels, which PNG keeps losslessly,
+  // so the bitmap is the same), and the next sprite is painted meanwhile. Where the worker or
+  // OffscreenCanvas is missing, or it fails once, toDataURL as before.
+  let workerEnc = null; // false once it has failed
+  function encodeOff(id, k, p) {
+    if (workerEnc === false || typeof createImageBitmap !== 'function' || !encoderWorker()) return null;
+    return createImageBitmap(p.cv).then((bm) => encodePng(bm)).then((blob) => {
+      workerEnc = true;
+      p.cv.width = p.cv.height = 0;
+      // (what this thread spent on it: the painting)
+      learnMs += p.ms; learnPx += p.cw * p.ch;
+      if (p.cw * p.ch > BIG_PX) { learnBigMs += p.ms; learnBigPx += p.cw * p.ch; }
+      return makeEntry(id, k, p.cw, p.ch, blob, p.ms);
+    }, () => { workerEnc = false; return encodeHere(id, k, p); });
   }
   // (fromStore: loaded from js/raster-cache.js, not painted. A painted one is stored there once it
   // is kept: store(), never before, e.g. while an off-thread one waits for the boot probe's answer.)
@@ -1010,23 +1141,67 @@ ${inkFilter('ke', s, r)}
   // (prefetches for the old scale are dropped while a resize refit is pending)
   // (a prefetch for a scene or for idle time: while its tag is alive)
   const stillWanted = (job) => job.direct || job.by.some((r) => (r.tag ? r.tag.alive && !held : r.im.isConnected && ((r.prefetch && !held) || r.im._atWant === job.key)));
-  async function runJob(job) {
+  // (painted: called once this thread's part is done, when the PNG is encoded off it: encodeOff)
+  // (DEFER: painted, its PNG to be encoded later: a job's canvas waiting for its own moment, serialPick)
+  const DEFER = {};
+  async function runJob(job, painted) {
+    if (job.canvas) return encodeLater(job);
     if (!stillWanted(job)) return null;
     const sized = await sizedCheck();
     if (sized && !stillWanted(job)) return null;
+    const t0 = performance.now();
     const svg = sized ? await sizedImage(job.id, job.k) : await svgImage(job.id);
-    let entry = null;
+    let entry = null, t1 = 0, p = null;
     try {
       if (mode !== 'bitmap') return null;
       await nextTask();
       if (mode !== 'bitmap' || !stillWanted(job)) return null;
-      entry = bake(job.id, job.k, svg);
+      t1 = performance.now();
+      p = paint(job.id, job.k, svg);
+      if (p) spriteRate.set(job.id, Math.max(spriteRate.get(job.id) || 0, p.ms / (p.cw * p.ch)));
     } finally {
       if (sized && svg) svg.release();
     }
+    const off = p && sized ? encodeOff(job.id, job.k, p) : null;
+    if (off && painted) painted();
+    const log = (e, extra) => { if (bakeLog.length < 4000) bakeLog.push(Object.assign({ id: job.id, k: job.k, px: job.px, sized: !!(sized && svg && svg.im), s: sized && svg && svg.s, at: Math.round(t0), load: Math.round(t1 - t0), paint: Math.round(p.ms), ms: e ? Math.round(e.ms) : 0, off: !!off, calm: calmUntil >= t1 + p.ms, by: byOf(job), scene: AT.sceneName, playing }, extra)); };
+    // Without the encoder worker (the one-file bundle, older Safari) a big prefetch's PNG would hold this
+    // thread up as long again: in live play its canvas waits for a moment of its own (serialPick), unless an
+    // img wants it now
+    if (p && !off && sized && serialLive() && playing && job.pri >= PRI.scene && job.px > BIG_PX) {
+      job.canvas = p;
+      log(null, { deferred: true });
+      return DEFER;
+    }
+    entry = off ? await off : p && encodeHere(job.id, job.k, p);
     if (!entry) { failed.add(job.key); return null; }
+    log(entry);
     await predecode(entry);
     return entry;
+  }
+  const byOf = (job) => (job.by.some((r) => r.im) || job.direct ? 'img' : job.by.some((r) => r.tag && r.tag.pri === PRI.scene) ? 'scene' : 'idle');
+  // the PNG of a job painted earlier (DEFER), even if nobody wants it any more: it is painted, and the next
+  // visit to its scene will
+  async function encodeLater(job) {
+    const p = job.canvas;
+    job.canvas = null;
+    if (mode !== 'bitmap') { p.cv.width = p.cv.height = 0; return null; }
+    const t1 = performance.now();
+    p.waited = t1 - p.t0 - p.ms;
+    const entry = encodeHere(job.id, job.k, p);
+    if (!entry) { failed.add(job.key); return null; }
+    if (bakeLog.length < 4000) bakeLog.push({ id: job.id, k: job.k, px: job.px, at: Math.round(t1), paint: Math.round(p.encMs), encode: true, off: false, calm: calmUntil >= performance.now(), by: byOf(job), scene: AT.sceneName, playing });
+    await predecode(entry);
+    return entry;
+  }
+  // (every bitmap painted on the page's thread: AT.art.bakeLog(), for measuring and tests/webkit: what was
+  // painted, how long its painting held the thread up (paint) and whether that was in a calm moment)
+  const bakeLog = [];
+  // A canvas with sprite id painted at k the way runJob paints it (tests/webkit: the encoded bitmap is the same)
+  async function paintCanvas(id, k) {
+    const sized = await sizedCheck();
+    const svg = sized ? await sizedImage(id, k) : await svgImage(id);
+    try { const p = paint(id, k, svg); return p && p.cv; } finally { if (sized && svg) svg.release(); }
   }
   // A painted bitmap is decoded before it is put in, so swapping the src is immediate. Chromium
   // queues img.decode() with the compositor, forcing a frame: while a still preview's SVG is being
@@ -1109,8 +1284,19 @@ ${inkFilter('ke', s, r)}
         // (not where bitmaps are painted from sized SVGs: asyncCheck says no there too)
         const useAsync = asyncOk !== false && !sizedNeed && tuning.async && typeof createImageBitmap === 'function';
         if (!queue.length) { if (!inflight && !loadingStored) break; await slot(); continue; }
-        const i = pickLane();
+        // (painting on this thread in live play: what is not needed now waits for a moment that can take it;
+        // prefetches nobody wants any more are let go of first)
+        if (serialLive()) { dropUnwanted(); if (!queue.length) continue; }
+        let i = pickLane();
+        const serial = serialLive();
+        if (serial && !nowOk(queue[i])) {
+          i = queue.findIndex(nowOk);
+          if (i < 0) i = serialPick();
+          if (i < 0) { parked = true; checkIdle(); await nap(serialWait()); parked = false; continue; }
+        }
         const job = queue[i];
+        // (a prefetch painted on this thread while the scene is played: the next one after a frame or so)
+        const spaced = serial && playing && !nowOk(job);
         // sprites whose scale changes every frame (checkScales: a ratchet shows it magnified until its
         // bitmap arrives; an offer is the step it needs in a few frames) go first, painted here: the
         // background round trip (tens of ms, longer behind big jobs) would show them magnified for frames
@@ -1136,14 +1322,82 @@ ${inkFilter('ke', s, r)}
           job.resolve(null);
           continue;
         }
+        // (at most a few PNGs being encoded off this thread: each holds a copy of its pixels)
+        if (!entry && sizedNeed && inflight && (inflight >= ENC_MAX || inflightPx + job.px > ENC_PX)) { await slot(); continue; }
         queue.splice(i, 1);
         await runHere(job, entry);
+        if (spaced) serialNext = performance.now() + SERIAL_GAP;
       }
     } finally {
       running = false;
       checkIdle();
     }
   }
+  // ----- painting on the page's thread in live play (WebKit: sizedNeed; anywhere off-thread painting is
+  // not exact) -----
+  // There every bitmap is one task on the page's thread: a background takes 1.5 s at 2x, a close-up
+  // about 1 s. So what a scene's imgs need is painted behind its cover, and nothing else: its manifest
+  // (close-ups, thought bubbles, celebrations) and idle-time prefetches wait until it is played, and
+  // then a bitmap estimated to take at most SERIAL_SLICE is painted every SERIAL_GAP or so (each one is
+  // a short task between frames), while a bigger one waits for a calm moment that can hold it: the
+  // narrator speaking (calm(ms), from js/game.js when a narrator line starts: nothing to tap or watch
+  // until it ends), if the line has time left for it, the biggest that fits first. An img that needs a
+  // bitmap now (a close-up behind its cover) gets it at once, as before. Not in ?manual tests and
+  // recordings (they wait for idle() at every step), nor where bitmaps are painted off it (Chromium).
+  const SERIAL_SLICE = 100, SERIAL_GAP = 50;
+  let calmUntil = 0, serialNext = 0, parked = false;
+  const serialLive = () => {
+    const E = AT.engine;
+    return mode === 'bitmap' && (sizedNeed === true || asyncOk === false) && !!E && !E.manual && !E.recording && !spriteLog;
+  };
+  // (a job that may go now whatever the moment: one an img or a tween needs, or taken from the store)
+  const nowOk = (job) => job.pri < PRI.scene || cache.has(job.key) || (!job.unstored && !!stored(job.id, job.k));
+  // ms of main-thread painting a job is expected to take (big ones at the rate big ones have taken)
+  // (a canvas waiting for its PNG: the encoding; a big one to paint: its painting, as its PNG is encoded off
+  // this thread or later)
+  // (at the rate this sprite painted at before, else the big ones' or at least SERIAL_RATE: underestimated,
+  // a hub badge at 3x took 315 ms where 92 were expected, outside a calm moment)
+  const SERIAL_RATE = 1e-3; // ms per device pixel (WebKitGTK at 2x: 0.3-0.9 measured)
+  const spriteRate = new Map();
+  const serialCost = (job) => (job.canvas ? (learnEncPx > 1e6 ? learnEncMs / learnEncPx : 2.5e-4) * job.px
+    : (spriteRate.get(job.id) || (job.px > BIG_PX && learnBigPx > 2e6 ? learnBigMs / learnBigPx : Math.max(SERIAL_RATE, learnPx > 2e5 ? learnMs / learnPx : 0))) * job.px);
+  // the queued job to paint now (-1: none), most urgent first, then the biggest
+  function serialPick() {
+    if (!playing) return -1; // (behind a cover, or a still preview: the scene's own imgs only)
+    const now = performance.now();
+    if (now < serialNext) return -1;
+    // (a calm moment goes to the biggest job that fits in it, as such moments are few: the small ones fit
+    // between any frames, the most urgent first)
+    const calm = calmUntil - now;
+    let b = -1, bc = 0;
+    for (let i = 0; i < queue.length; i++) {
+      const j = queue[i], c = serialCost(j), isBig = c > SERIAL_SLICE;
+      if (isBig && !(c * 1.1 + 50 <= calm)) continue;
+      // (bigger by a tenth or more; else the most urgent, then an idle-time prefetch's own order)
+      const size = isBig || bc > SERIAL_SLICE ? (c > bc * 1.1 ? 1 : bc > c * 1.1 ? -1 : 0) : 0;
+      const better = b < 0 || size > 0 || (size === 0 && (j.pri < queue[b].pri || (j.pri === queue[b].pri && before(j, queue[b]))));
+      if (better) { b = i; bc = c; }
+    }
+    return b;
+  }
+  // (one painted already, waiting for its PNG; then an idle-time prefetch's own order, else the bigger first)
+  const before = (a, b) => (!a.canvas !== !b.canvas ? !!a.canvas : a.order != null && b.order != null && a.order !== b.order ? a.order < b.order : a.px > b.px);
+  function dropUnwanted() {
+    for (let i = queue.length - 1; i >= 0; i--) {
+      const job = queue[i];
+      // (one painted already, waiting for its PNG, is kept: encodeLater)
+      if (job.pri < PRI.scene || job.canvas || stillWanted(job)) continue;
+      queue.splice(i, 1);
+      st.dropped++;
+      jobs.delete(job.key);
+      job.resolve(null);
+    }
+  }
+  const serialWait = () => Math.max(20, Math.min(250, serialNext - performance.now()));
+  const nap = (ms) => new Promise((resolve) => { const t = setTimeout(resolve, ms); slotWake = () => { clearTimeout(t); resolve(); }; });
+  const wakePump = () => { const w = slotWake; slotWake = null; if (w) w(); };
+  // the page is calm for the next ms (js/game.js: the narrator is speaking)
+  function calm(ms) { calmUntil = performance.now() + ms; wakePump(); }
   // Promise of the bitmap of sprite id at scale k (shared while in flight). `by`:
   // {im} when an img asked for it (painted only while it still wants it), {im, prefetch}
   // for a bitmap an img may use soon (painted while the img is connected), nothing for a
@@ -1156,7 +1410,9 @@ ${inkFilter('ke', s, r)}
     if (hit) return Promise.resolve(hit);
     let job = jobs.get(key);
     const px = pxOf({ id, k });
-    const pri = !by ? PRI.img : by.urgent ? PRI.urgent : by.tag ? (by.tag.pri === PRI.scene && px > BIG_PX ? PRI.img : by.tag.pri) : PRI.img;
+    // (a scene's big ones start with its imgs where several are painted at once; not on one thread,
+    // where they would hold its cover up: serialLive)
+    const pri = !by ? PRI.img : by.urgent ? PRI.urgent : by.tag ? (by.tag.pri === PRI.scene && px > BIG_PX && !serialLive() ? PRI.img : by.tag.pri) : PRI.img;
     if (!job) {
       job = { id, k, key, by: [], direct: false, pri, px };
       job.promise = new Promise((resolve) => { job.resolve = resolve; });
@@ -1210,16 +1466,35 @@ ${inkFilter('ke', s, r)}
       checkIdle();
     });
   }
-  // Paint a job on the page's own thread (synchronously, between tasks).
+  // Paint a job on the page's own thread (synchronously, between tasks). Returns once this thread's part
+  // is done: a job whose PNG is encoded off the thread (encodeOff) finishes later, counted in flight.
   async function runHere(job, entry) {
     entry = entry || cache.get(job.key) || null;
-    if (!entry && mode === 'bitmap') {
-      try { entry = await runJob(job); } catch (e) { entry = null; }
-      if (entry) { store(entry); idleDone(job); }
-      else if (!failed.has(job.key)) st.dropped++;
+    const finish = (e) => {
+      if (!e && mode === 'bitmap' && !failed.has(job.key)) st.dropped++;
+      if (e && mode === 'bitmap') { store(e); idleDone(job); }
+      jobs.delete(job.key);
+      job.resolve(e && mode === 'bitmap' ? e : null);
+    };
+    if (entry || mode !== 'bitmap') { jobs.delete(job.key); job.resolve(entry); return; }
+    let painted;
+    const handed = new Promise((r) => { painted = r; });
+    const run = runJob(job, painted).catch(() => null);
+    // (painted, its PNG to come: back in the queue, see runJob)
+    run.then((e) => { if (e === DEFER) { queue.push(job); wakePump(); } });
+    if (await Promise.race([run.then(() => false), handed.then(() => true)])) {
+      const px = job.px;
+      inflight++; inflightPx += px;
+      run.then(finish).finally(() => {
+        inflight--; inflightPx -= px;
+        const w = slotWake; slotWake = null;
+        if (w) w();
+        checkIdle();
+      });
+      return;
     }
-    jobs.delete(job.key);
-    job.resolve(entry);
+    const e = await run;
+    if (e !== DEFER) finish(e);
   }
   // Which queued job next: the most urgent class first (PRI), and within it the biggest, so that on
   // several threads the long jobs start first and the scene is ready soonest (a 2 s background
@@ -1227,6 +1502,7 @@ ${inkFilter('ke', s, r)}
   // must be in before it is uncovered; the rest only before it plays), except its big bitmaps (over
   // a megapixel: close-ups), which start with the scene's own big ones.
   const PRI = { urgent: 0, img: 1, scene: 2, idle: 3 };
+  const ENC_MAX = 3, ENC_PX = 24e6; // PNGs encoded off the page's thread while it paints the next (encodeOff)
   const BIG_PX = 1e6;
   function pick() {
     let b = 0;
@@ -1549,7 +1825,9 @@ ${inkFilter('ke', s, r)}
       const b = sprites[im.dataset.sprite].box, k = kWanted(im, pass);
       count(p, b[2] * b[3] * k * k);
     }
-    if (opts.scene) for (const [p, px] of prefetchScene(opts.scene)) count(p, px);
+    // (not waited for where bitmaps are painted on the page's thread in live play: there the manifest waits
+    // until the scene is played, serialPick; known a few ms after boot, sizedCheck)
+    if (opts.scene) for (const [p, px] of prefetchScene(opts.scene)) count(sizedCheck().then(() => (serialLive() ? null : p)), px);
     report();
     checkIdle();
     return Promise.all(waits).then(() => {});
@@ -1631,13 +1909,48 @@ ${inkFilter('ke', s, r)}
   const IDLE_PX = 2.5e5;
   let idleTag = { alive: false };
   const whenIdle = (fn) => (typeof requestIdleCallback === 'function' ? requestIdleCallback(fn, { timeout: 1000 }) : setTimeout(() => fn(null), 50));
+  // Painting on the page's thread (serialLive), the big ones are asked for at once and wait in the queue
+  // for calm moments (serialPick): every big one of the scenes that can follow, then the big ones that two
+  // or more of the scenes after those share (from the title: the hub's dolls house, then the bathroom of
+  // potty and teeth and the lounge of tv and party, painted while the title's narrator speaks).
   function idlePrefetch(name) {
     idleTag.alive = false;
     const E = AT.engine;
     if (!name || mode !== 'bitmap' || !E || E.manual || E.recording || params.get('nop2')) return;
     const tag = idleTag = { alive: true, pri: PRI.idle };
     const uses = new Map(), small = [];
-    const next = (window.AT_SPRITES && window.AT_SPRITES.next[name]) || [];
+    const nextOf = (sc) => (window.AT_SPRITES && window.AT_SPRITES.next[sc]) || [];
+    const next = nextOf(name);
+    if (serialLive()) {
+      const bigs = new Map(), later = new Map();
+      for (const sc of next) for (const [id, k] of sceneList(sc)) if (pxOf({ id, k }) > BIG_PX) bigs.set(keyOf(id, k), [id, k]);
+      for (const sc of next) {
+        for (const sc2 of nextOf(sc)) {
+          if (sc2 === name || next.indexOf(sc2) >= 0) continue;
+          for (const [id, k] of sceneList(sc2)) {
+            const key = keyOf(id, k);
+            if (pxOf({ id, k }) <= BIG_PX || bigs.has(key)) continue;
+            const u = later.get(key) || { id, k, sc: new Set() };
+            u.sc.add(sc2);
+            later.set(key, u);
+          }
+        }
+      }
+      // (the shared ones in the order the scenes come in AT_SPRITES.next, the hub's lists potty first, for
+      // those of about the same size)
+      const rank = (u) => Math.min(...[...u.sc].map((sc2) => { let r = 99; for (const sc of next) { const i = nextOf(sc).indexOf(sc2); if (i >= 0) r = Math.min(r, i); } return r; }));
+      for (const u of [...later.values()].filter((v) => v.sc.size > 1).sort((a, b) => rank(a) - rank(b))) bigs.set(keyOf(u.id, u.k), [u.id, u.k]);
+      // (the biggest first, as a calm moment may hold only one: a background saves most on a cover)
+      let order = 0;
+      for (const [id, k0] of [...bigs.values()].sort((a, b) => Math.round(pxOf({ id: b[0], k: b[1] }) / 1e6) - Math.round(pxOf({ id: a[0], k: a[1] }) / 1e6))) {
+        const k = nearK(id, k0), key = keyOf(id, k);
+        // (one asked for by an earlier call, whose tag is dead now, is asked for again: the job is shared)
+        if (cache.has(key) || failed.has(key) || st.decoded >= budget() / 2) continue;
+        rasterize(id, k, { tag });
+        const job = jobs.get(key);
+        if (job) job.order = order++; // (serialPick: in this order)
+      }
+    }
     for (const sc of next) {
       const l = sceneList(sc);
       let px = 0;
@@ -1663,8 +1976,9 @@ ${inkFilter('ke', s, r)}
         const off = offMain(id);
         const isSmall = off ? pxOf({ id, k }) <= IDLE_PX : estimate(id, k) <= SYNC_MS;
         if (cache.has(key) || jobs.has(key) || failed.has(key) || (big ? isSmall || !off : !isSmall)) { list.shift(); continue; }
-        // only when nothing else is painting, within the idle period, and well within the memory budget
-        if (running || inflight || st.decoded > budget() / 2) break;
+        // only when nothing else is painting (or only what waits for a calm moment), within the idle period,
+        // and well within the memory budget
+        if ((running && !parked) || inflight || st.decoded > budget() / 2) break;
         // (off the main thread only its loading and encoding are on it)
         if (!off && deadline && estimate(id, k) > deadline.timeRemaining() && !deadline.didTimeout) break;
         list.shift();
@@ -1679,7 +1993,7 @@ ${inkFilter('ke', s, r)}
   const idleDone = (job) => { if (job.by.length && job.by.every((r) => r.tag && r.tag.pri === PRI.idle)) st.idleJobs++; };
   // Is a scene being played (not loading behind a cover)? Bitmaps painted then are counted (stats().playMisses).
   let playing = false;
-  const play = (on) => { playing = !!on; };
+  const play = (on) => { playing = !!on; wakePump(); };
 
   // ----- bitmaps stored across visits (js/raster-cache.js: IndexedDB) -----
   const disk = () => (mode === 'bitmap' && typeof AT !== 'undefined' && AT.rasterCache) || null;
@@ -2113,14 +2427,16 @@ ${inkFilter('ke', s, r)}
   // the scales sprite id is cached at, and every cached bitmap's key (tests)
   const cachedScales = (id) => [...(byId.get(id) || [])].map((e) => e.k).sort((a, b) => a - b);
   const cachedKeys = () => [...cache.keys()];
+  // the jobs waiting to be painted, as [key, priority class, estimated ms] (tests, measuring)
+  const queued = () => queue.map((j) => [j.key, Object.keys(PRI).find((n) => PRI[n] === j.pri), Math.round(serialCost(j))]);
 
   return {
     define, img, url, svgOf, box, has, list,
     get mode() { return mode; },
-    fit, idle, stats, cachedScales, cachedKeys, setSprite, shows, kOf, kPeak, deviceMatrix, rasterize, estimate, tweenStart, tweenEnd, spriteLog: spriteLogRows,
-    sceneList, prefetchScene, idlePrefetch, play, warm, storeReady, persist, housekeep, showSvg, whenPainting, holdDecodes, lanes,
+    fit, idle, stats, cachedScales, cachedKeys, queued, setSprite, shows, kOf, kPeak, deviceMatrix, rasterize, estimate, tweenStart, tweenEnd, spriteLog: spriteLogRows, bakeLog: () => bakeLog, paintCanvas,
+    sceneList, prefetchScene, idlePrefetch, play, calm, warm, storeReady, persist, housekeep, showSvg, whenPainting, holdDecodes, lanes,
     sweep, audit, ready, cost, track, scaleChanged, resnapSoon, resized, hold, inexactToSvg,
-    C, E, R, smooth, blob, fluff, puffs, star, heart, line, rng, group, inkPad: INK_PAD, pathBox, filterArea, get sized() { return sizedNeed; },
+    C, E, R, smooth, blob, fluff, puffs, star, heart, line, rng, group, inkPad: INK_PAD, pathBox, filterArea, get sized() { return sizedNeed; }, get serial() { return mode === 'bitmap' && (sizedNeed === true || asyncOk === false); },
     mix, inkOf, shade, tint, SEPIA,
   };
 })();
