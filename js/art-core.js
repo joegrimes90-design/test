@@ -115,7 +115,7 @@ AT.art = (() => {
   // ws  : same, gentler wobble for small details
   // t   : translucent glaze (shadows, blush, washes over other paint)
   // bg  : big soft background wash
-  // k   : ink line, ks: fine ink line
+  // k   : ink line, ks: fine ink line, ke: solid ink for closed eyes (no pencil grain, so they never fade out)
   function defs(seed) {
     const key = seed;
     if (defsCache[key]) return defsCache[key];
@@ -153,6 +153,7 @@ ${wash('t', 0.022, 8, 3, 0.32, false)}
 ${wash('bg', 0.008, 22, 7, 0.3, false)}
 ${ink('k', 4, 2.2, 0.35)}
 ${ink('ks', 1.6, 1.6, 0.25)}
+${ink('ke', 1.4, 0.4, 0.3)}
 </defs>`;
     defsCache[key] = out;
     return out;

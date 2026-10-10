@@ -133,18 +133,18 @@ AT.palette = {
   A.define('at_eyes_wide', FB, () => [eyePair(14, 18), brows(-8)]);
   A.define('at_eyes_worry', FB, () => [eyePair(11.5, 15), brows(-4, -7)]);
   A.define('at_eyes_blink', FB, () => [
-    { d: line([[-EX - 12, EY + 1], [-EX, EY + 6], [-EX + 12, EY + 1]]), k: P.eyes, sw: 4, f: null },
-    { d: line([[EX - 12, EY + 1], [EX, EY + 6], [EX + 12, EY + 1]]), k: P.eyes, sw: 4, f: null },
+    { d: line([[-EX - 12, EY + 1], [-EX, EY + 6], [-EX + 12, EY + 1]]), k: P.eyes, sw: 5.2, kf: 'ke', f: null },
+    { d: line([[EX - 12, EY + 1], [EX, EY + 6], [EX + 12, EY + 1]]), k: P.eyes, sw: 5.2, kf: 'ke', f: null },
     brows(),
   ]);
   A.define('at_eyes_happy', FB, () => [
-    { d: line([[-EX - 13, EY + 4], [-EX, EY - 8], [-EX + 13, EY + 4]]), k: P.eyes, sw: 4.6, f: null },
-    { d: line([[EX - 13, EY + 4], [EX, EY - 8], [EX + 13, EY + 4]]), k: P.eyes, sw: 4.6, f: null },
+    { d: line([[-EX - 13, EY + 4], [-EX, EY - 8], [-EX + 13, EY + 4]]), k: P.eyes, sw: 6.0, kf: 'ke', f: null },
+    { d: line([[EX - 13, EY + 4], [EX, EY - 8], [EX + 13, EY + 4]]), k: P.eyes, sw: 6.0, kf: 'ke', f: null },
     brows(-4),
   ]);
   A.define('at_eyes_squeeze', FB, () => [
-    { d: line([[-EX - 12, EY - 7], [-EX + 8, EY], [-EX - 12, EY + 7]]), k: P.eyes, sw: 4.4, f: null },
-    { d: line([[EX + 12, EY - 7], [EX - 8, EY], [EX + 12, EY + 7]]), k: P.eyes, sw: 4.4, f: null },
+    { d: line([[-EX - 12, EY - 7], [-EX + 8, EY], [-EX - 12, EY + 7]]), k: P.eyes, sw: 5.7, kf: 'ke', f: null },
+    { d: line([[EX + 12, EY - 7], [EX - 8, EY], [EX + 12, EY + 7]]), k: P.eyes, sw: 5.7, kf: 'ke', f: null },
     brows(2, -6),
   ]);
   const MB = [-50, -275, 100, 62];
@@ -230,22 +230,22 @@ AT.palette = {
     { d: E(MEX, MEY, 8, ry), f: P.eyes, fx: 'ws', sw: 1.4 },
     { d: C(-MEX - 3, MEY - 4, 3), f: W, fx: 'flat', k: false },
     { d: C(MEX - 3, MEY - 4, 3), f: W, fx: 'flat', k: false },
-    { d: line([[-MEX - 11, MEY - 6], [-MEX - 16, MEY - 11]]), k: P.eyes, sw: 2.4, f: null },
-    { d: line([[MEX + 11, MEY - 6], [MEX + 16, MEY - 11]]), k: P.eyes, sw: 2.4, f: null },
+    { d: line([[-MEX - 11, MEY - 6], [-MEX - 16, MEY - 11]]), k: P.eyes, sw: 3.1, kf: 'ke', f: null },
+    { d: line([[MEX + 11, MEY - 6], [MEX + 16, MEY - 11]]), k: P.eyes, sw: 3.1, kf: 'ke', f: null },
     { d: line([[-MEX - 10, MEY - 22], [-MEX, MEY - 26], [-MEX + 10, MEY - 23]]), k: shade(P.mamaHair, 0.2), sw: 3, f: null },
     { d: line([[MEX - 10, MEY - 23], [MEX, MEY - 26], [MEX + 10, MEY - 22]]), k: shade(P.mamaHair, 0.2), sw: 3, f: null },
   ];
   const MFB = [-56, -336, 112, 60];
   A.define('mm_eyes_open', MFB, () => mmEyes(11));
   A.define('mm_eyes_happy', MFB, () => [
-    { d: line([[-MEX - 10, MEY + 3], [-MEX, MEY - 6], [-MEX + 10, MEY + 3]]), k: P.eyes, sw: 3.6, f: null },
-    { d: line([[MEX - 10, MEY + 3], [MEX, MEY - 6], [MEX + 10, MEY + 3]]), k: P.eyes, sw: 3.6, f: null },
+    { d: line([[-MEX - 10, MEY + 3], [-MEX, MEY - 6], [-MEX + 10, MEY + 3]]), k: P.eyes, sw: 4.7, kf: 'ke', f: null },
+    { d: line([[MEX - 10, MEY + 3], [MEX, MEY - 6], [MEX + 10, MEY + 3]]), k: P.eyes, sw: 4.7, kf: 'ke', f: null },
     { d: line([[-MEX - 10, MEY - 22], [-MEX, MEY - 28], [-MEX + 10, MEY - 24]]), k: shade(P.mamaHair, 0.2), sw: 3, f: null },
     { d: line([[MEX - 10, MEY - 24], [MEX, MEY - 28], [MEX + 10, MEY - 22]]), k: shade(P.mamaHair, 0.2), sw: 3, f: null },
   ]);
   A.define('mm_eyes_blink', MFB, () => [
-    { d: line([[-MEX - 9, MEY], [-MEX, MEY + 4], [-MEX + 9, MEY]]), k: P.eyes, sw: 3, f: null },
-    { d: line([[MEX - 9, MEY], [MEX, MEY + 4], [MEX + 9, MEY]]), k: P.eyes, sw: 3, f: null },
+    { d: line([[-MEX - 9, MEY], [-MEX, MEY + 4], [-MEX + 9, MEY]]), k: P.eyes, sw: 3.9, kf: 'ke', f: null },
+    { d: line([[MEX - 9, MEY], [MEX, MEY + 4], [MEX + 9, MEY]]), k: P.eyes, sw: 3.9, kf: 'ke', f: null },
   ]);
   const MMY = MHY + 44;
   const MMB = [-40, MMY - 24, 80, 50];
@@ -307,14 +307,14 @@ AT.palette = {
     { d: line([[DEX - 12, DEY - 27], [DEX, DEY - 30], [DEX + 12, DEY - 26]]), k: P.dadaHair, sw: 4.4, f: null },
   ]);
   A.define('dd_eyes_happy', DFB, () => [
-    { d: line([[-DEX - 9, DEY + 3], [-DEX, DEY - 5], [-DEX + 9, DEY + 3]]), k: P.eyes, sw: 3.4, f: null },
-    { d: line([[DEX - 9, DEY + 3], [DEX, DEY - 5], [DEX + 9, DEY + 3]]), k: P.eyes, sw: 3.4, f: null },
+    { d: line([[-DEX - 9, DEY + 3], [-DEX, DEY - 5], [-DEX + 9, DEY + 3]]), k: P.eyes, sw: 4.4, kf: 'ke', f: null },
+    { d: line([[DEX - 9, DEY + 3], [DEX, DEY - 5], [DEX + 9, DEY + 3]]), k: P.eyes, sw: 4.4, kf: 'ke', f: null },
     { d: line([[-DEX - 12, DEY - 28], [-DEX, DEY - 33], [-DEX + 12, DEY - 29]]), k: P.dadaHair, sw: 4.4, f: null },
     { d: line([[DEX - 12, DEY - 29], [DEX, DEY - 33], [DEX + 12, DEY - 28]]), k: P.dadaHair, sw: 4.4, f: null },
   ]);
   A.define('dd_eyes_blink', DFB, () => [
-    { d: line([[-DEX - 8, DEY], [-DEX, DEY + 4], [-DEX + 8, DEY]]), k: P.eyes, sw: 3, f: null },
-    { d: line([[DEX - 8, DEY], [DEX, DEY + 4], [DEX + 8, DEY]]), k: P.eyes, sw: 3, f: null },
+    { d: line([[-DEX - 8, DEY], [-DEX, DEY + 4], [-DEX + 8, DEY]]), k: P.eyes, sw: 3.9, kf: 'ke', f: null },
+    { d: line([[DEX - 8, DEY], [DEX, DEY + 4], [DEX + 8, DEY]]), k: P.eyes, sw: 3.9, kf: 'ke', f: null },
     { d: line([[-DEX - 12, DEY - 26], [-DEX, DEY - 30], [-DEX + 12, DEY - 27]]), k: P.dadaHair, sw: 4.4, f: null },
     { d: line([[DEX - 12, DEY - 27], [DEX, DEY - 30], [DEX + 12, DEY - 26]]), k: P.dadaHair, sw: 4.4, f: null },
   ]);
@@ -376,22 +376,22 @@ AT.palette = {
     { d: C(BEX - 3, BEY - 4, 3.2), f: W, fx: 'flat', k: false },
   ]);
   A.define('bb_eyes_happy', BFB, () => [
-    { d: line([[-BEX - 9, BEY + 3], [-BEX, BEY - 5], [-BEX + 9, BEY + 3]]), k: P.eyes, sw: 3.4, f: null },
-    { d: line([[BEX - 9, BEY + 3], [BEX, BEY - 5], [BEX + 9, BEY + 3]]), k: P.eyes, sw: 3.4, f: null },
+    { d: line([[-BEX - 9, BEY + 3], [-BEX, BEY - 5], [-BEX + 9, BEY + 3]]), k: P.eyes, sw: 4.4, kf: 'ke', f: null },
+    { d: line([[BEX - 9, BEY + 3], [BEX, BEY - 5], [BEX + 9, BEY + 3]]), k: P.eyes, sw: 4.4, kf: 'ke', f: null },
   ]);
   A.define('bb_eyes_closed', BFB, () => [
-    { d: line([[-BEX - 9, BEY], [-BEX, BEY + 5], [-BEX + 9, BEY]]), k: P.eyes, sw: 3, f: null },
-    { d: line([[BEX - 9, BEY], [BEX, BEY + 5], [BEX + 9, BEY]]), k: P.eyes, sw: 3, f: null },
+    { d: line([[-BEX - 9, BEY], [-BEX, BEY + 5], [-BEX + 9, BEY]]), k: P.eyes, sw: 3.9, kf: 'ke', f: null },
+    { d: line([[BEX - 9, BEY], [BEX, BEY + 5], [BEX + 9, BEY]]), k: P.eyes, sw: 3.9, kf: 'ke', f: null },
   ]);
   A.define('bb_eyes_cry', BFB, () => [
-    { d: line([[-BEX - 10, BEY - 4], [-BEX + 6, BEY + 1], [-BEX - 10, BEY + 6]]), k: P.eyes, sw: 3.4, f: null },
-    { d: line([[BEX + 10, BEY - 4], [BEX - 6, BEY + 1], [BEX + 10, BEY + 6]]), k: P.eyes, sw: 3.4, f: null },
+    { d: line([[-BEX - 10, BEY - 4], [-BEX + 6, BEY + 1], [-BEX - 10, BEY + 6]]), k: P.eyes, sw: 4.4, kf: 'ke', f: null },
+    { d: line([[BEX + 10, BEY - 4], [BEX - 6, BEY + 1], [BEX + 10, BEY + 6]]), k: P.eyes, sw: 4.4, kf: 'ke', f: null },
   ]);
   A.define('bb_eyes_sleepy', BFB, () => [
     { d: E(-BEX, BEY + 3, 8, 5), f: P.eyes, fx: 'ws', sw: 1.4 },
     { d: E(BEX, BEY + 3, 8, 5), f: P.eyes, fx: 'ws', sw: 1.4 },
-    { d: line([[-BEX - 10, BEY], [BEX - 34 + 0, BEY]]), k: A.inkOf(P.babySkin), sw: 3, f: null },
-    { d: line([[BEX - 10, BEY], [BEX + 10, BEY]]), k: A.inkOf(P.babySkin), sw: 3, f: null },
+    { d: line([[-BEX - 10, BEY], [-BEX + 10, BEY]]), k: P.eyes, sw: 3.4, kf: 'ke', f: null },
+    { d: line([[BEX - 10, BEY], [BEX + 10, BEY]]), k: P.eyes, sw: 3.4, kf: 'ke', f: null },
   ]);
   const BMY = BHY + 32;
   const BMB = [-34, BMY - 20, 68, 44];
