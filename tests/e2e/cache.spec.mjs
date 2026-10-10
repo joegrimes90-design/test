@@ -27,15 +27,19 @@ test('a reload paints nothing: every bitmap comes from the cache, and the title 
   expect(cold.art.jobs, 'bitmaps painted on the first visit').toBeGreaterThan(60);
   expect(cold.art.stored).toBe(0);
   expect(cold.art.asyncStored, 'bitmaps painted off the main thread and stored').toBeGreaterThan(0);
+  expect(cold.cache.memBytes, 'PNGs waiting to be written are counted in memory').toBeGreaterThanOrEqual(cold.cache.heldBytes);
   await page.evaluate(() => AT.rasterCache.flush());
   const written = await page.evaluate(() => AT.rasterCache.stats());
   expect(written.records).toBeGreaterThanOrEqual(cold.art.jobs);
-  expect(written.heldBytes, 'PNG bytes still held in memory once written').toBe(0);
+  expect(written.heldBytes, 'PNG bytes still waiting to be written').toBe(0);
+  // written records let go of their PNG bytes (a later use reads them from disk)
+  expect(written.memBytes, 'PNG bytes records still hold in memory once written').toBe(0);
   const warm = await titleAt2s(page); // (openGame navigates again: a reload in the same profile)
   test.info().annotations.push({ type: 'cache', description: `cold: painted ${cold.art.jobs}; reload: painted ${warm.art.jobs}, from the cache ${warm.art.stored} (${warm.cache.loaded} records read in ${warm.cache.loadMs} ms)` });
   expect(warm.art.jobs, 'bitmaps painted on the reload').toBe(0);
   expect(warm.art.stored, 'bitmaps from the cache').toBeGreaterThanOrEqual(60);
   expect(warm.art.storedBad).toBe(0);
+  expect(warm.cache.memBytes, 'PNG bytes held in memory on the reload (nothing painted)').toBe(0);
   expect(warm.png.equals(cold.png), 'bit-identical screenshots').toBe(true);
 });
 
@@ -58,7 +62,7 @@ test('IndexedDB that throws (sandboxed iframes, some file:// pages): the game pa
   // cache, within its memory budget
   const c = await page.evaluate(() => AT.rasterCache.stats());
   expect(c.refused, 'bitmaps offered to the store').toBeGreaterThan(60);
-  expect({ records: c.records, bytes: c.bytes, held: c.held, heldBytes: c.heldBytes, pending: c.pending }).toEqual({ records: 0, bytes: 0, held: 0, heldBytes: 0, pending: 0 });
+  expect({ records: c.records, bytes: c.bytes, held: c.held, heldBytes: c.heldBytes, memBytes: c.memBytes, pending: c.pending }).toEqual({ records: 0, bytes: 0, held: 0, heldBytes: 0, memBytes: 0, pending: 0 });
   // (the fixture fails the test on any console error)
 });
 
@@ -70,6 +74,7 @@ test('a reload after the game stored its bitmaps by itself (idle time after the 
   const c = await page.evaluate(() => AT.rasterCache.stats());
   expect(c.writes).toBeGreaterThanOrEqual(cold.art.jobs);
   expect(c.heldBytes).toBe(0);
+  expect(c.memBytes, 'PNG bytes records still hold in memory once the game has written them').toBe(0);
   const warm = await titleAt2s(page);
   expect(warm.art.jobs, 'bitmaps painted on the reload').toBe(0);
   expect(warm.art.stored, 'bitmaps from the cache').toBeGreaterThanOrEqual(60);

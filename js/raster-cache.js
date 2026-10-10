@@ -49,6 +49,7 @@ AT.rasterCache = (() => {
   const used = new Map();      // key -> last use (Date.now())
   const pending = new Map();   // key -> record to write
   const held = new Set();      // records whose blob is held in memory until it is written
+  const painted = typeof WeakSet === 'function' ? new WeakSet() : null; // records put() made from a PNG painted this visit (its blob in memory, not on disk)
   const touched = new Set();   // keys used this session (their 'used' time is written)
   const deleted = new Set();   // keys to delete
   const st = { available: false, loaded: 0, loadMs: 0, hits: 0, writes: 0, deletes: 0, errors: 0, ignored: 0, refused: 0 };
@@ -171,6 +172,7 @@ AT.rasterCache = (() => {
     deleted.delete(r.key);
     pending.set(r.key, r);
     hold(r);
+    if (painted) painted.add(r);
     if (heldBytes > HELD_MAX) {
       if (db) flush();
       else {
@@ -262,11 +264,17 @@ AT.rasterCache = (() => {
   }
 
   // records/bytes: what is stored (or about to be); heldBytes: PNG bytes held in memory until they
-  // are written; busy: a write is pending, queued or under way
+  // are written; memBytes: PNG bytes painted this visit that records still hold in memory (the
+  // held ones, and any a write failed to let go of: 0 once everything is written; the blobs of
+  // records read at boot are handles to the files on disk, not counted); busy: a write is pending,
+  // queued or under way
   function stats() {
-    let bytes = 0;
-    for (const r of records.values()) bytes += r.bytes || 0;
-    return { ...st, records: records.size, bytes, pending: pending.size, held: held.size, heldBytes, busy: !!(pending.size || flushQueued || flushing) };
+    let bytes = 0, memBytes = 0;
+    for (const r of records.values()) {
+      bytes += r.bytes || 0;
+      if (r.blob && painted && painted.has(r)) memBytes += r.blob.size || 0;
+    }
+    return { ...st, records: records.size, bytes, pending: pending.size, held: held.size, heldBytes, memBytes, busy: !!(pending.size || flushQueued || flushing) };
   }
 
   // leaving or hiding the page: write what is pending (best effort)
