@@ -116,3 +116,41 @@ test('in the stepped test mode, hiding the page leaves the sound alone', async (
   expect(await page.evaluate(() => AT.audio.ctx.state)).toBe('running');
   await setHidden(page, false);
 });
+
+test('iPhone silent switch: a silent looping <audio> keeps the page\'s sound "playback" (started by a tap, paused while hidden, not over a cartoon)', async ({ page }) => {
+  await prepare(page);
+  await page.goto('/index.html?unmute=1');
+  await page.waitForFunction(() => performance.getEntriesByName('at:live:title').length > 0, null, { timeout: 60_000 });
+  expect(await page.evaluate(() => AT.audio.keeper), 'nothing before a tap').toBe(null);
+  await tapStage(page, 800, 640);
+  await expect.poll(() => page.evaluate(() => AT.audio.keeper && !AT.audio.keeper.paused), { timeout: 20_000 }).toBe(true);
+  expect(await page.evaluate(() => ({ loop: AT.audio.keeper.loop, inDom: AT.audio.keeper.isConnected }))).toEqual({ loop: true, inDom: false });
+
+  await setHidden(page, true);
+  await expect.poll(() => page.evaluate(() => AT.audio.keeper.paused)).toBe(true);
+  await setHidden(page, false);
+  await page.mouse.click(5, 5);
+  await expect.poll(() => page.evaluate(() => AT.audio.keeper.paused)).toBe(false);
+
+  // a playing cartoon: a tap does not start it over the cartoon
+  await page.evaluate(() => {
+    AT.audio.keeper.pause();
+    const v = document.createElement('video');
+    Object.defineProperty(v, 'paused', { get: () => false });
+    v.id = 'fake-cartoon';
+    document.body.appendChild(v);
+  });
+  await page.mouse.click(5, 5);
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(() => AT.audio.keeper.paused)).toBe(true);
+  await page.evaluate(() => document.getElementById('fake-cartoon').remove());
+});
+
+test('the silent <audio> is only for iPhone and iPad: not on other browsers by default', async ({ page }) => {
+  await prepare(page);
+  await page.goto('/index.html');
+  await page.waitForFunction(() => performance.getEntriesByName('at:live:title').length > 0, null, { timeout: 60_000 });
+  await tapStage(page, 800, 640);
+  await expect.poll(() => page.evaluate(() => AT.audio.ready), { timeout: 20_000 }).toBe(true);
+  expect(await page.evaluate(() => AT.audio.keeper)).toBe(null);
+});

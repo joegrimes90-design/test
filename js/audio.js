@@ -48,10 +48,60 @@ AT.audio = (() => {
     } catch (e) { /* old Web Audio */ }
   }
   function hold(on) { pauseSound('refit', !!on); }
+
+  // ---------- iPhone and iPad: the silent switch ----------
+  // iOS plays Web Audio as 'ambient' sound, which the ring/silent switch mutes, while <video>
+  // and <audio> elements play through it (so the cartoons were heard and nothing else).
+  // navigator.audioSession.type = 'playback' fixes that on iOS 17+, but not in every embed
+  // (the claude.ai artifact frame, older iOS). A silent, looping <audio> element started from
+  // a tap does it everywhere: while it plays, the page's sound is 'playback' and Web Audio is
+  // heard too. It is paused while the page is hidden, never started over a playing cartoon (a
+  // phone allows one), and started again by the next tap after anything stopped it.
+  // ?unmute=1 forces it on elsewhere (tests), ?unmute=0 off.
+  const unmuteParam = new URLSearchParams(location.search).get('unmute');
+  const appleTouch = /iP(hone|ad|od)/.test(navigator.userAgent) ||
+    (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1); // (iPadOS asks for desktop pages)
+  const wantKeeper = unmuteParam ? unmuteParam === '1' : appleTouch;
+  let keeper = null;
+  function silentWav() {
+    // half a second of 8 kHz 8-bit mono silence (128 is the 8-bit zero)
+    const n = 4000;
+    const b = new Uint8Array(44 + n);
+    const dv = new DataView(b.buffer);
+    const ws = (o, s) => { for (let i = 0; i < s.length; i++) b[o + i] = s.charCodeAt(i); };
+    ws(0, 'RIFF'); dv.setUint32(4, 36 + n, true); ws(8, 'WAVE'); ws(12, 'fmt ');
+    dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+    dv.setUint32(24, 8000, true); dv.setUint32(28, 8000, true); dv.setUint16(32, 1, true); dv.setUint16(34, 8, true);
+    ws(36, 'data'); dv.setUint32(40, n, true);
+    b.fill(128, 44);
+    let s = '';
+    for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+    return 'data:audio/wav;base64,' + btoa(s);
+  }
+  function keepSession() {
+    if (!wantKeeper || rec.on || document.hidden) return;
+    const E = AT.engine;
+    if (E && (E.recording || E.manual) && unmuteParam !== '1') return;
+    if (Array.prototype.some.call(document.querySelectorAll('video'), (v) => !v.paused && !v.ended)) return;
+    if (!keeper) {
+      keeper = document.createElement('audio');
+      keeper.setAttribute('x-webkit-airplay', 'deny');
+      keeper.disableRemotePlayback = true;
+      keeper.controls = false;
+      keeper.loop = true;
+      keeper.preload = 'auto';
+      keeper.src = silentWav();
+    }
+    if (!keeper.paused) return;
+    try { const p = keeper.play(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* not allowed yet */ }
+  }
+  function releaseSession() { if (keeper && !keeper.paused) keeper.pause(); }
+
   function unlock() {
     init();
     if (!ctx) return;
     try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { /* optional */ }
+    keepSession();
     if (pausedFor.size) resumeAfter = true; // resumed when the pause ends
     else if (ctx.state !== 'running') ctx.resume();
     const b = ctx.createBuffer(1, 1, 22050);
@@ -541,6 +591,7 @@ AT.audio = (() => {
   // hold(), so a resize repaint still under way when the page comes back keeps it quiet.
   document.addEventListener('visibilitychange', () => {
     const E = AT.engine;
+    if (document.hidden) releaseSession(); // (started again by the next tap)
     if (!ctx || rec.on || !E || E.recording || E.manual) return;
     pauseSound('hidden', document.hidden);
   });
@@ -617,6 +668,7 @@ AT.audio = (() => {
     get muted() { return muted; },
     get ready() { return !!ctx && ctx.state === 'running'; },
     get ctx() { return ctx; },
+    get keeper() { return keeper; }, // (tests)
     resumeMusic() { if (cur && cur.pending) { const n = cur.name; cur = null; music(n); } },
   };
 })();
