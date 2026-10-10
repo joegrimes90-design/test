@@ -1077,7 +1077,7 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     let random = false;
     for (const e of m) {
       if (e[0] !== id) continue;
-      if (e.length === 2 && Math.abs(round3(e[1] * u) - k) < 0.0015) return false;
+      if (e.length === 2 && Math.abs(round3(kRel(e[1], u)) - k) < 0.0015) return false;
       if (e.length === 4 && e[3] === 0 && k >= (e[1] * u) / 1.1 && k <= e[2] * u * 1.1) random = true;
     }
     return random;
@@ -1243,6 +1243,13 @@ ${ink('ks', 1.6, 1.6, 0.25)}
   // scales come from (DOMMatrix.scale() takes single-precision floats: at 1194x834, 2 x 0.74625 comes
   // out as 1.49249995, not 1.4925, and the manifest's keys must round the same way as the imgs')
   const unitScale = () => { const E = AT.engine; return E && E.stage ? scaleOf(cumMatrix(E.stage)) : dpr(); };
+  // The device scale of a sprite placed at relative scale rel (a manifest row), computed exactly as its
+  // img's own comes out of cumMatrix: the stage's scale u (single precision: DOMMatrix.scale()) times
+  // the node's scale as its CSS transform parses (single precision: scale(0.6000) is 0.60000002384),
+  // multiplied in double precision (DOMMatrix.multiply). So round3 of it is the img's key, below 1 as
+  // well: at 1194x834, 0.6 x 1.49249995 is 0.89549997 (key 0.895) but the thought bubbles' potty and
+  // bottle come out as 0.89550000 (key 0.896).
+  const kRel = (rel, u) => u * Math.fround(rel);
   function note(id, raw, n, im) {
     const sc = spriteLog && AT.sceneName;
     if (!sc || !(raw > 0)) return;
@@ -1350,8 +1357,8 @@ ${ink('ks', 1.6, 1.6, 0.25)}
     for (const e of m) {
       const id = e[0];
       if (!sprites[id]) continue;
-      if (e.length === 2) add(id, round3(e[1] * u));
-      else if (e.length === 3 && e[2] === 8 && random.has(id)) add(id, bucketUp(e[1] * u, 8));
+      if (e.length === 2) add(id, round3(kRel(e[1], u)));
+      else if (e.length === 3 && e[2] === 8 && random.has(id)) add(id, bucketUp(kRel(e[1], u), 8));
       else if (e.length === 3) every(id, stepWindow(e[1], e[2])[0], stepWindow(e[1], e[2])[1], e[2]);
       else if (e[3] > 0) every(id, stepWindow(e[1], e[3])[0], stepWindow(e[2], e[3])[1], e[3]);
     }

@@ -128,6 +128,24 @@ test('a step listed at the manifest\'s own size is one bitmap there, and every s
   assert.deepEqual(bad.slice(0, 20), []);
 });
 
+test('an exact row\'s key is rounded from the scale the sprite\'s own matrix gives, below 1 as well', () => {
+  // A sprite's scale is the stage's (single precision: DOMMatrix.scale(); at 1194x834 at 2x,
+  // 1.49249995) times its node's as the CSS transform parses (single precision: scale(0.6000) is
+  // 0.60000002), multiplied in double precision: the thought bubbles' icons at s 0.6 come out at
+  // 0.89550000 (key 0.896). The plain product 0.6 x 1.49249995 = 0.89549997 would make it 0.895:
+  // painted twice behind the cover, and again during play.
+  const listAt = (u, sc) => { game.devicePixelRatio = u; try { return A.sceneList(sc).filter(([id]) => id === (sc === 'baby' ? 'bottle' : 'potty')).map(([, k]) => k); } finally { delete game.devicePixelRatio; } };
+  const u = Math.fround(1.4925);
+  assert.ok(M.scenes.potty.some((e) => e[0] === 'potty' && e.length === 2 && e[1] === 0.6), 'potty lists its bubble\'s potty at 0.6');
+  assert.ok(M.scenes.baby.some((e) => e[0] === 'bottle' && e.length === 2 && e[1] === 0.6), 'baby lists its bubble\'s bottle at 0.6');
+  assert.equal(Math.round(u * 0.6 * 1000) / 1000, 0.895, '(the plain product rounds down)');
+  for (const sc of ['potty', 'baby']) {
+    const ks = listAt(u, sc);
+    assert.ok(ks.includes(0.896), `${sc} at 1194x834 at 2x: ${JSON.stringify(ks)}`);
+    assert.ok(!ks.includes(0.895), `${sc} at 1194x834 at 2x: not the plain product's key`);
+  }
+});
+
 test('the manifest is a classic script that index.html loads before the game boots', () => {
   const html = read('index.html');
   assert.ok(html.indexOf('js/sprite-manifest.js') > html.indexOf('js/art-scenes.js'), 'after the art');

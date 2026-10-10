@@ -14,6 +14,45 @@ function paintedInPlay(page) {
   return keys;
 }
 const artStats = (page) => page.evaluate(() => AT.art.stats());
+// Sprites cached at two keys a rounding step apart (k and k + 0.001: the same scale painted twice,
+// because the manifest's key and the sprite's own rounded apart).
+function twice(keys) {
+  const by = {};
+  for (const k of keys) { const [id, s] = k.split('@'); (by[id] = by[id] || []).push(+s); }
+  const out = [];
+  for (const [id, ss] of Object.entries(by)) { ss.sort((a, b) => a - b); for (let i = 1; i < ss.length; i++) if (ss[i] / ss[i - 1] - 1 < 0.0012) out.push(`${id}@${ss[i - 1]}/${ss[i]}`); }
+  return out;
+}
+// Potty's three rounds (the choice bubble's potty at s 0.6) and the hand-washing close-up, then the
+// sticker flying to the hub's chart.
+async function playPotty(page) {
+  const missed = paintedInPlay(page);
+  await prepare(page, { audio: false });
+  await openGame(page, { scene: 'potty', query: { debug: '1' } });
+  await waitShown(page, 'potty');
+  const shownKeys = await page.evaluate(() => AT.art.cachedKeys());
+  const res = await autoPlay(page, () => AT.sceneName === 'hub' && performance.getEntriesByName('at:shown:hub').length > 0, { exactRubs: true });
+  await step(page, 8, 10); // the new sticker flies to the chart
+  const st = await artStats(page);
+  test.info().annotations.push({ type: 'play', description: `${res.actions} actions; painted during play: ${st.playMisses} (${missed.join(', ')}), random sizes ${st.playRandom}` });
+  return { res, missed, st, shownKeys };
+}
+// Baby to the end (the thought bubbles' bottle and teddy at s 0.6), then the party's award and balloons.
+async function playBabyParty(page) {
+  const missed = paintedInPlay(page);
+  await setProgress(page, { potty: true, teeth: true, baby: false, party: false, visits: 2 });
+  await prepare(page, { audio: false });
+  await openGame(page, { scene: 'baby', query: { debug: '1' } });
+  await waitShown(page, 'baby');
+  const shownKeys = await page.evaluate(() => AT.art.cachedKeys());
+  await autoPlay(page, () => AT.sceneName === 'party' && performance.getEntriesByName('at:shown:party').length > 0, { exactRubs: true });
+  // the award, then balloons rising (random sizes: painted when they appear, never listed)
+  await stepUntil(page, () => !!document.querySelector('#ui img[data-sprite="trophy"]'), { maxClock: 30 });
+  await step(page, 20, 10);
+  const st = await artStats(page);
+  test.info().annotations.push({ type: 'play', description: `painted during play: ${st.playMisses} (${missed.join(', ')}), random sizes ${st.playRandom}` });
+  return { missed, st, shownKeys };
+}
 
 // Per animation frame from the start: preview state, the clock, and what the stage shows.
 function sampler() {
@@ -120,31 +159,14 @@ test.describe('at the manifest\'s reference size (1280x720 at 2x)', () => {
   });
 
   test('potty: three rounds and the hand-washing close-up, then the sticker on the hub: nothing painted during play', async ({ page }) => {
-    const missed = paintedInPlay(page);
-    await prepare(page, { audio: false });
-    await openGame(page, { scene: 'potty', query: { debug: '1' } });
-    await waitShown(page, 'potty');
-    const res = await autoPlay(page, () => AT.sceneName === 'hub' && performance.getEntriesByName('at:shown:hub').length > 0, { exactRubs: true });
-    await step(page, 8, 10); // the new sticker flies to the chart
-    const st = await artStats(page);
-    test.info().annotations.push({ type: 'play', description: `${res.actions} actions; painted during play: ${st.playMisses} (${missed.join(', ')}), random sizes ${st.playRandom}` });
+    const { res, missed, st } = await playPotty(page);
     expect(res.log.some((a) => a.includes('soap')), 'reached the hand-washing close-up').toBe(true);
     expect(missed, 'bitmaps painted during play (not in the manifest)').toEqual([]);
     expect(st.playMisses).toBe(0);
   });
 
   test('baby to the end, then the party: nothing painted during play but random sizes', async ({ page }) => {
-    const missed = paintedInPlay(page);
-    await setProgress(page, { potty: true, teeth: true, baby: false, party: false, visits: 2 });
-    await prepare(page, { audio: false });
-    await openGame(page, { scene: 'baby', query: { debug: '1' } });
-    await waitShown(page, 'baby');
-    await autoPlay(page, () => AT.sceneName === 'party' && performance.getEntriesByName('at:shown:party').length > 0, { exactRubs: true });
-    // the award, then balloons rising (random sizes: painted when they appear, never listed)
-    await stepUntil(page, () => !!document.querySelector('#ui img[data-sprite="trophy"]'), { maxClock: 30 });
-    await step(page, 20, 10);
-    const st = await artStats(page);
-    test.info().annotations.push({ type: 'play', description: `painted during play: ${st.playMisses} (${missed.join(', ')}), random sizes ${st.playRandom}` });
+    const { missed, st } = await playBabyParty(page);
     expect(missed, 'bitmaps painted during play (not in the manifest)').toEqual([]);
     expect(st.playMisses).toBe(0);
   });
@@ -185,7 +207,8 @@ test.describe('at the manifest\'s reference size (1280x720 at 2x)', () => {
 
 // Where the stage scale is not a round number (iPad 11" at 1194x834: 0.74625), the sprites' own
 // scales (from the stage's DOMMatrix, single precision) and the manifest's must round to the same
-// bitmap keys, or everything is painted twice and the close-ups during play.
+// bitmap keys, or everything is painted twice and the close-ups during play. Below scale 1 as well:
+// at 1194x834 the thought bubbles' icons (s 0.6) come out at 0.8955000 (key 0.896), not 0.895.
 for (const vp of [{ width: 1194, height: 834 }, { width: 1180, height: 820 }]) {
   test.describe(`at ${vp.width}x${vp.height} at 2x`, () => {
     test.use({ viewport: vp, deviceScaleFactor: 2 });
@@ -202,13 +225,6 @@ for (const vp of [{ width: 1194, height: 834 }, { width: 1180, height: 820 }]) {
         return { keys, bgK: AT.art.kOf(bg), listed };
       });
       expect(at.listed, 'the manifest\'s background key').toContain(at.bgK);
-      const twice = (keys) => {
-        const by = {};
-        for (const k of keys) { const [id, s] = k.split('@'); (by[id] = by[id] || []).push(+s); }
-        const out = [];
-        for (const [id, ss] of Object.entries(by)) { ss.sort((a, b) => a - b); for (let i = 1; i < ss.length; i++) if (ss[i] / ss[i - 1] - 1 < 0.0012) out.push(`${id}@${ss[i - 1]}/${ss[i]}`); }
-        return out;
-      };
       expect(twice(at.keys), 'sprites painted at two keys a rounding step apart').toEqual([]);
       await autoPlay(page, () => [...document.querySelectorAll('img[data-sprite="tooth_dirt"]')].filter((im) => im.parentNode.style.opacity === '0').length >= 4);
       await step(page, 0.5, 10);
@@ -218,6 +234,26 @@ for (const vp of [{ width: 1194, height: 834 }, { width: 1180, height: 820 }]) {
       expect(end.st.playMisses).toBe(0);
       expect(twice(end.keys), 'sprites painted at two keys a rounding step apart').toEqual([]);
     });
+
+    if (vp.width === 1194) {
+      test('potty: the choice bubble\'s potty (s 0.6) at its own key, nothing painted during play or twice', async ({ page }) => {
+        const { res, missed, st, shownKeys } = await playPotty(page);
+        expect(res.log.some((a) => a.includes('soap')), 'reached the hand-washing close-up').toBe(true);
+        expect(twice(shownKeys), 'sprites painted at two keys a rounding step apart (behind the cover)').toEqual([]);
+        expect(missed, 'bitmaps painted during play (not in the manifest)').toEqual([]);
+        expect(st.playMisses).toBe(0);
+        expect(twice(await page.evaluate(() => AT.art.cachedKeys())), 'sprites painted at two keys a rounding step apart').toEqual([]);
+        expect(await page.evaluate(() => AT.art.sceneList('potty').filter(([id]) => id === 'potty').map(([, k]) => k)), 'the bubble\'s potty listed at its own key').toContain(0.896);
+      });
+
+      test('baby then the party: the thought bubbles\' icons (s 0.6) at their own keys, nothing painted during play or twice', async ({ page }) => {
+        const { missed, st, shownKeys } = await playBabyParty(page);
+        expect(twice(shownKeys), 'sprites painted at two keys a rounding step apart (behind the cover)').toEqual([]);
+        expect(missed, 'bitmaps painted during play (not in the manifest)').toEqual([]);
+        expect(st.playMisses).toBe(0);
+        expect(twice(await page.evaluate(() => AT.art.cachedKeys())), 'sprites painted at two keys a rounding step apart').toEqual([]);
+      });
+    }
 
     test('the bathroom painted in idle time in the hub is the one potty shows (real clock)', async ({ page }) => {
       await prepare(page, { audio: false });
