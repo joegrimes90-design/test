@@ -22,6 +22,13 @@
  * what this code writes (foreign or corrupt data) are ignored and deleted. It
  * never asks for persistent storage (navigator.storage.persist(): Firefox would
  * show the player a permission prompt for a cache that is cheap to rebuild).
+ * WebKit cannot store a Blob in IndexedDB in an ephemeral session (Safari Private Browsing,
+ * WebDriver; "Error preparing Blob/File data to be stored"), and a transaction where several
+ * such puts failed never finishes, which holds up every later write. So before the first write
+ * one tiny Blob is put on its own (probeBlobs); where that fails, the PNGs are written as
+ * ArrayBuffers instead (read back as Blobs). A write that fails anyway is tried once more as
+ * ArrayBuffers; one that fails as those, or does not finish within WRITE_MS, means nothing more
+ * is kept this visit.
  * Nothing here logs console errors.
  */
 window.AT = window.AT || {};
@@ -55,6 +62,10 @@ AT.rasterCache = (() => {
   const st = { available: false, loaded: 0, loadMs: 0, hits: 0, writes: 0, deletes: 0, errors: 0, ignored: 0, refused: 0 };
   const HELD_MAX = 48 * 1048576; // PNG bytes waiting to be written, at most
   let flushing = null, flushQueued = false, housekept = false, heldBytes = 0;
+  // how PNGs are written: 'blob', 'buffer' (ArrayBuffer: where Blobs can't be stored), 'off' (neither could)
+  let format = 'blob';
+  let probing = null, probed = false;
+  const WRITE_MS = 30000;
   const hold = (r) => { if (!held.has(r)) { held.add(r); heldBytes += r.bytes || 0; } };
   const release = (r) => { if (held.delete(r)) heldBytes -= r.bytes || 0; };
 
@@ -101,7 +112,15 @@ AT.rasterCache = (() => {
   // a record this code wrote (anything else in the store, foreign or corrupt, is ignored and deleted)
   const valid = (r) => !!r && typeof r.key === 'string' && typeof r.id === 'string' && typeof r.hash === 'string' &&
     typeof r.k === 'number' && isFinite(r.k) && r.k > 0 && r.cw > 0 && r.ch > 0 && isFinite(r.cw) && isFinite(r.ch) &&
-    typeof Blob !== 'undefined' && r.blob instanceof Blob;
+    typeof Blob !== 'undefined' && (r.blob instanceof Blob || (typeof ArrayBuffer !== 'undefined' && r.png instanceof ArrayBuffer));
+  // a stored record's PNG as a Blob (records written as ArrayBuffers: see format)
+  const pngOf = (x) => (x.blob instanceof Blob ? x.blob : new Blob([x.png], { type: 'image/png' }));
+  const toBuffer = (b) => (b.arrayBuffer ? b.arrayBuffer() : new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result);
+    fr.onerror = () => reject(fr.error);
+    fr.readAsArrayBuffer(b);
+  }));
 
   // Open the database and read every record: call early (AT.boot); resolves when done or given up.
   function load() {
@@ -125,7 +144,11 @@ AT.rasterCache = (() => {
       })(), LOAD_MS);
       if (!all) return false;
       for (const r of all[0]) {
-        if (valid(r)) records.set(r.key, r);
+        if (valid(r) && r.png) {
+          // (written as an ArrayBuffer: its bytes are read from disk when used, not kept from here)
+          format = 'buffer';
+          records.set(r.key, { key: r.key, id: r.id, hash: r.hash, k: r.k, cw: r.cw, ch: r.ch, ms: r.ms, bytes: r.bytes, blob: null, created: r.created });
+        } else if (valid(r)) records.set(r.key, r);
         else { st.ignored++; if (r && (typeof r.key === 'string' || typeof r.key === 'number')) deleted.add(r.key); }
       }
       for (const u of all[1]) if (u && u.key) used.set(u.key, u.used);
@@ -154,7 +177,7 @@ AT.rasterCache = (() => {
     if (!db) return Promise.resolve(null);
     return timeout((async () => {
       const x = await req(db.transaction('bm', 'readonly').objectStore('bm').get(r.key));
-      return valid(x) ? x.blob : null;
+      return valid(x) ? pngOf(x) : null;
     })(), LOAD_MS);
   }
   // A stored record was just used to show a bitmap.
@@ -163,7 +186,7 @@ AT.rasterCache = (() => {
   // nowhere to write it; at most HELD_MAX bytes wait for a database that is slow to open.
   function put(id, hash, k, entry) {
     if (!entry || !entry.blob || typeof Blob === 'undefined' || !(entry.blob instanceof Blob)) return;
-    if (!db && !lateOpen && !waiting) { st.refused++; return; }
+    if ((!db && !lateOpen && !waiting) || format === 'off') { st.refused++; return; }
     const r = { key: key(id, hash, k), id, hash, k, cw: entry.cw, ch: entry.ch, ms: Math.round(entry.ms || 0), bytes: entry.blob.size, blob: entry.blob, created: Date.now() };
     const old = records.get(r.key);
     if (old) release(old);
@@ -194,38 +217,96 @@ AT.rasterCache = (() => {
     deleted.add(r.key);
   }
 
+  // Can a Blob be stored here? One tiny one put (and deleted) on its own: format 'buffer' if not.
+  function probeBlobs() {
+    if (!probing) {
+      const KEY = '\u0000blob-probe';
+      probing = timeout(new Promise((resolve) => {
+        try {
+          const tx = db.transaction('bm', 'readwrite');
+          const bm = tx.objectStore('bm');
+          const r = bm.put({ key: KEY, blob: new Blob([new Uint8Array(1)], { type: 'image/png' }) });
+          r.onsuccess = () => bm.delete(KEY);
+          let settled = false;
+          tx.oncomplete = () => resolve(true);
+          tx.onerror = tx.onabort = (ev) => {
+            if (ev && ev.preventDefault) ev.preventDefault();
+            if (settled) return;
+            settled = true;
+            try { tx.abort(); } catch (e) { /* aborted already */ }
+            resolve(false);
+          };
+        } catch (e) { resolve(false); }
+      }), 5000).then((ok) => {
+        probed = true;
+        if (ok === null) { format = 'off'; forget(); } // (the store is stuck: nothing will be written)
+        else if (!ok && format === 'blob') format = 'buffer';
+      });
+    }
+    return probing;
+  }
+
   // Write what is pending in one readwrite transaction. Resolves when it is committed (or failed).
   // Written records let go of their PNG bytes (read() gets them from disk).
   function flush() {
     if (flushing) return flushing.then(() => (db && (pending.size || deleted.size || touched.size) ? flush() : undefined));
     if (!db || (!pending.size && !deleted.size && !touched.size)) return Promise.resolve();
+    if (format === 'blob' && !probed && pending.size) return probeBlobs().then(() => flush());
     const puts = [...pending.values()], dels = [...deleted], uses = [...touched];
     pending.clear(); deleted.clear(); touched.clear();
-    flushing = new Promise((resolve) => {
-      try {
-        const tx = db.transaction(['bm', 'used'], 'readwrite');
-        const bm = tx.objectStore('bm'), us = tx.objectStore('used');
-        for (const r of puts) { bm.put(r); us.put({ key: r.key, used: used.get(r.key) || r.created }); }
-        for (const k of uses) if (records.has(k)) us.put({ key: k, used: used.get(k) });
-        for (const k of dels) { bm.delete(k); us.delete(k); }
-        tx.oncomplete = () => {
+    const as = format;
+    let retry = false;
+    // (not written: forgotten, painted again when needed; the first time Blobs fail, written
+    // again as ArrayBuffers; when those fail too, nothing more is kept)
+    const failed = () => {
+      st.errors++;
+      if (as === 'blob' && format === 'blob') { format = 'buffer'; retry = true; }
+      else if (as === 'buffer') format = 'off';
+      for (const r of puts) {
+        if (retry && records.get(r.key) === r && r.blob) pending.set(r.key, r);
+        else { release(r); if (records.get(r.key) === r) records.delete(r.key); }
+      }
+      if (format === 'off') forget();
+    };
+    const bytes = as === 'buffer' ? Promise.all(puts.map((r) => (r.blob ? toBuffer(r.blob) : null))) : Promise.resolve(null);
+    flushing = bytes.then((bufs) => new Promise((resolve) => {
+      let tx = null, settled = false, timer = 0;
+      const done = (ok) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (ok) {
           st.writes += puts.length; st.deletes += dels.length;
           for (const r of puts) { release(r); if (records.get(r.key) === r) r.blob = null; }
-          resolve();
-        };
+        } else failed();
+        resolve();
+      };
+      try {
+        if (!db || format === 'off') { done(false); return; }
+        tx = db.transaction(['bm', 'used'], 'readwrite');
+        const bm = tx.objectStore('bm'), us = tx.objectStore('used');
+        puts.forEach((r, i) => {
+          if (bufs && !bufs[i]) return;
+          bm.put(bufs ? { key: r.key, id: r.id, hash: r.hash, k: r.k, cw: r.cw, ch: r.ch, ms: r.ms, bytes: r.bytes, png: bufs[i], created: r.created } : r);
+          us.put({ key: r.key, used: used.get(r.key) || r.created });
+        });
+        for (const k of uses) if (records.has(k)) us.put({ key: k, used: used.get(k) });
+        for (const k of dels) { bm.delete(k); us.delete(k); }
+        tx.oncomplete = () => done(true);
         tx.onerror = tx.onabort = (ev) => {
           if (ev && ev.preventDefault) ev.preventDefault();
-          st.errors++;
-          // (not written: forgotten, painted again when needed)
-          for (const r of puts) { release(r); if (records.get(r.key) === r) records.delete(r.key); }
-          resolve();
+          if (settled) return; // (an error, then the abort)
+          try { tx.abort(); } catch (e) { /* aborted already */ }
+          done(false);
         };
+        // (a transaction that never finishes holds up every later one: nothing more is written)
+        timer = setTimeout(() => { if (!settled) { format = 'off'; done(false); } }, WRITE_MS);
       } catch (e) {
-        st.errors++;
-        for (const r of puts) { release(r); if (records.get(r.key) === r) records.delete(r.key); }
-        resolve();
+        // (a put that throws at once: nothing of this transaction is kept)
+        if (tx) { tx.oncomplete = tx.onerror = tx.onabort = null; try { tx.abort(); } catch (e2) { /* done already */ } }
+        done(false);
       }
-    }).then(() => { flushing = null; });
+    }), () => { failed(); }).then(() => { flushing = null; if (retry) return flush(); });
     return flushing;
   }
   // Flush when the browser is idle (called after a scene has faded in).
@@ -267,14 +348,14 @@ AT.rasterCache = (() => {
   // are written; memBytes: PNG bytes painted this visit that records still hold in memory (the
   // held ones, and any a write failed to let go of: 0 once everything is written; the blobs of
   // records read at boot are handles to the files on disk, not counted); busy: a write is pending,
-  // queued or under way
+  // queued or under way; format: how PNGs are written ('blob', 'buffer' where Blobs could not be, 'off')
   function stats() {
     let bytes = 0, memBytes = 0;
     for (const r of records.values()) {
       bytes += r.bytes || 0;
       if (r.blob && painted && painted.has(r)) memBytes += r.blob.size || 0;
     }
-    return { ...st, records: records.size, bytes, pending: pending.size, held: held.size, heldBytes, memBytes, busy: !!(pending.size || flushQueued || flushing) };
+    return { ...st, records: records.size, bytes, pending: pending.size, held: held.size, heldBytes, memBytes, busy: !!(pending.size || flushQueued || flushing), format };
   }
 
   // leaving or hiding the page: write what is pending (best effort)

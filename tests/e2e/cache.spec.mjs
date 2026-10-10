@@ -3,7 +3,9 @@
 // time after a scene has faded in); an edited drawing is painted again, never served stale; a
 // browser that refuses IndexedDB still plays and keeps nothing for it; a stored bitmap of the
 // wrong size, or a record that is not a bitmap at all, is painted again; where the boot probe
-// finds off-thread painting inexact, nothing painted that way is kept or stored. At the visual
+// finds off-thread painting inexact, nothing painted that way is kept or stored; where IndexedDB
+// refuses Blobs (WebKit Private Browsing) they are stored as ArrayBuffers, and where it refuses
+// every write the store stops trying. At the visual
 // suites' size (1280x720 at 2x), in the stepped test mode (?manual=1), so loads are bit-for-bit
 // comparable.
 import fs from 'node:fs';
@@ -79,6 +81,68 @@ test('a reload after the game stored its bitmaps by itself (idle time after the 
   expect(warm.art.jobs, 'bitmaps painted on the reload').toBe(0);
   expect(warm.art.stored, 'bitmaps from the cache').toBeGreaterThanOrEqual(60);
   expect(warm.png.equals(cold.png), 'bit-identical screenshots').toBe(true);
+});
+
+// WebKit in an ephemeral session (Safari Private Browsing) fails every write holding a Blob ("Error
+// preparing Blob/File data to be stored in object store"): here a put of a record with a Blob aborts
+// its transaction. The store's probe (one tiny Blob put on its own) finds that before the first
+// write; where the probe passes and the writes fail all the same, they are written again as
+// ArrayBuffers.
+for (const [what, refuseProbe, errors] of [['the probe finds it', true, 0], ['found by a failed write', false, 1]]) {
+  test(`where IndexedDB refuses Blobs (WebKit Private Browsing; ${what}), the PNGs are stored as ArrayBuffers: a reload paints nothing and is bit-identical`, async ({ page }) => {
+    await page.addInitScript((refuseProbe) => {
+      const put = IDBObjectStore.prototype.put;
+      window.__blobPuts = 0;
+      IDBObjectStore.prototype.put = function (v, ...rest) {
+        const r = put.call(this, v, ...rest);
+        if (v && v.blob instanceof Blob && (refuseProbe || v.id)) { window.__blobPuts++; this.transaction.abort(); }
+        return r;
+      };
+    }, refuseProbe);
+    await prepare(page, { audio: false });
+    const cold = await titleAt2s(page);
+    await page.evaluate(() => AT.rasterCache.flush());
+    const c = await page.evaluate(() => ({ ...AT.rasterCache.stats(), blobPuts: window.__blobPuts }));
+    test.info().annotations.push({ type: 'cache', description: `blob puts refused ${c.blobPuts}, failed writes ${c.errors}, written ${c.writes} as ${c.format}` });
+    expect(c.blobPuts, 'a put of a Blob was tried and refused').toBeGreaterThan(0);
+    expect(c.format, 'PNGs written as ArrayBuffers').toBe('buffer');
+    expect(c.errors, 'failed writes').toBe(errors);
+    expect(c.writes).toBeGreaterThanOrEqual(cold.art.jobs);
+    expect({ pending: c.pending, heldBytes: c.heldBytes, memBytes: c.memBytes }).toEqual({ pending: 0, heldBytes: 0, memBytes: 0 });
+    const warm = await titleAt2s(page);
+    expect(warm.cache.format, 'a profile holding ArrayBuffer records goes on writing those').toBe('buffer');
+    expect(warm.art.jobs, 'bitmaps painted on the reload').toBe(0);
+    expect(warm.art.stored, 'bitmaps from the cache').toBeGreaterThanOrEqual(60);
+    expect(warm.art.storedBad).toBe(0);
+    expect(warm.cache.memBytes).toBe(0);
+    expect(warm.png.equals(cold.png), 'bit-identical screenshots').toBe(true);
+  });
+}
+
+test('where IndexedDB refuses every write, the store stops keeping bitmaps', async ({ page }) => {
+  await page.addInitScript(() => {
+    const put = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function (v, ...rest) {
+      const r = put.call(this, v, ...rest);
+      if (v && (v.blob || v.png)) this.transaction.abort();
+      return r;
+    };
+  });
+  await prepare(page, { audio: false });
+  await openGame(page);
+  await waitShown(page, 'title');
+  await page.evaluate(() => AT.rasterCache.flush());
+  const c = await page.evaluate(() => AT.rasterCache.stats());
+  // (the probe's Blob refused, then one write of ArrayBuffers)
+  expect({ format: c.format, errors: c.errors, writes: c.writes }).toEqual({ format: 'off', errors: 1, writes: 0 });
+  expect({ records: c.records, pending: c.pending, held: c.held, heldBytes: c.heldBytes, memBytes: c.memBytes }).toEqual({ records: 0, pending: 0, held: 0, heldBytes: 0, memBytes: 0 });
+  await step(page, 1);
+  await tapStage(page, 800, 640);
+  await waitShown(page, 'hub', { maxClock: 60 });
+  await step(page, 2);
+  const h = await page.evaluate(() => AT.rasterCache.stats());
+  expect(h.refused, 'later bitmaps are not queued').toBeGreaterThan(0);
+  expect({ errors: h.errors, records: h.records, pending: h.pending, heldBytes: h.heldBytes }).toEqual({ errors: 1, records: 0, pending: 0, heldBytes: 0 });
 });
 
 // js/art-characters.js with Mama's top in another colour (an edited drawing: AT.palette)
