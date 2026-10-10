@@ -116,8 +116,76 @@ AT.art = (() => {
   // t   : translucent glaze (shadows, blush, washes over other paint)
   // bg  : big soft background wash
   // k   : ink line, ks: fine ink line, ke: solid ink for closed eyes (no pencil grain, so they never fade out)
-  function defs(seed) {
-    const key = seed;
+  //
+  // The ink filters' region is the sprite's viewBox plus INK_PAD, in user units. WebKit
+  // (Safari, iPad, iPhone) draws nothing at all for an element whose filter region is over
+  // 4096 x 4096 px (tests/unit/filters.test.mjs): with the 5000 x 5000 region the ink used to
+  // have, every outline, brow, line mouth and line eye was missing there. The region stays
+  // inside that old one (-2000..3000), which Chromium has always clipped to: bg_bathroom ends
+  // at x 3000 and its floor lines run past it, and keeping that edge keeps Chromium's pixels
+  // bit-identical.
+  const INK_PAD = 24, INK_OLD = [-2000, 3000];
+  const INK = { k: [4, 2.2, 0.35], ks: [1.6, 1.6, 0.25], ke: [1.4, 0.4, 0.3] }; // wobble, grain, blur
+  // [x, y, w, h] of the region from its corners, within the old one
+  function inkRegion(x0, y0, x1, y1) {
+    x0 = Math.max(x0, INK_OLD[0]); y0 = Math.max(y0, INK_OLD[0]);
+    x1 = Math.min(x1, INK_OLD[1]); y1 = Math.min(y1, INK_OLD[1]);
+    return [x0, y0, x1 - x0, y1 - y0];
+  }
+  const inkFilter = (id, seed, r) => {
+    const [wob, grain, blur] = INK[id.replace(/_.*/, '')];
+    return `
+<filter id="${id}" filterUnits="userSpaceOnUse" x="${r[0]}" y="${r[1]}" width="${r[2]}" height="${r[3]}" color-interpolation-filters="sRGB">
+<feTurbulence type="fractalNoise" baseFrequency="0.03" numOctaves="2" seed="${seed + 5}" result="n"/>
+<feDisplacementMap in="SourceGraphic" in2="n" scale="${wob}" xChannelSelector="R" yChannelSelector="G" result="d"/>
+<feTurbulence type="fractalNoise" baseFrequency="0.22" numOctaves="2" seed="${seed + 9}" result="g"/>
+<feColorMatrix in="g" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ${-grain} ${grain * 0.5 + 1.15}" result="ga"/>
+<feComposite in="d" in2="ga" operator="in" result="p"/>
+<feGaussianBlur in="p" stdDeviation="${blur}"/>
+</filter>`;
+  };
+  // A stroke with a transform (the mirrored left leg, teddy's tilted arms) is filtered in its
+  // own, transformed user space, so it gets an ink filter of its own whose region is the
+  // padded viewBox mapped into that space. (Filtering it from an untransformed wrapping group
+  // would also do for WebKit, but would move its pencil grain: the noise is laid out in the
+  // filter's user space.)
+  function tfMatrix(tf) {
+    let m = [1, 0, 0, 1, 0, 0];
+    const mul = (a, b) => [a[0] * b[0] + a[2] * b[1], a[1] * b[0] + a[3] * b[1], a[0] * b[2] + a[2] * b[3], a[1] * b[2] + a[3] * b[3], a[0] * b[4] + a[2] * b[5] + a[4], a[1] * b[4] + a[3] * b[5] + a[5]];
+    tf.replace(/(\w+)\s*\(([^)]*)\)/g, (all, fn, args) => {
+      const v = args.trim().split(/[\s,]+/).map(Number);
+      let t;
+      if (fn === 'translate') t = [1, 0, 0, 1, v[0], v[1] || 0];
+      else if (fn === 'scale') t = [v[0], 0, 0, v.length > 1 ? v[1] : v[0], 0, 0];
+      else if (fn === 'rotate') {
+        const a = (v[0] * Math.PI) / 180, c = Math.cos(a), sn = Math.sin(a);
+        t = mul(mul([1, 0, 0, 1, v[1] || 0, v[2] || 0], [c, sn, -sn, c, 0, 0]), [1, 0, 0, 1, -(v[1] || 0), -(v[2] || 0)]);
+      } else if (fn === 'matrix') t = v;
+      else throw new Error('Unsupported transform ' + fn);
+      m = mul(m, t);
+      return all;
+    });
+    return m;
+  }
+  let inkTf = null; // while svgOf draws a sprite: {seed, box, ids: {kf + tf: id}, out: filters}
+  function inkFilterFor(kf, tf) {
+    const key = kf + ' ' + tf;
+    if (inkTf.ids[key]) return inkTf.ids[key];
+    const id = kf + '_' + Object.keys(inkTf.ids).length;
+    const [a, b, c, d, e, f] = tfMatrix(tf);
+    const det = a * d - b * c;
+    const [bx, by, bw, bh] = inkTf.box;
+    // the padded viewBox's corners in the stroke's user space (the inverse transform)
+    const pts = [[bx - INK_PAD, by - INK_PAD], [bx + bw + INK_PAD, by - INK_PAD], [bx - INK_PAD, by + bh + INK_PAD], [bx + bw + INK_PAD, by + bh + INK_PAD]]
+      .map(([x, y]) => [(d * (x - e) - c * (y - f)) / det, (a * (y - f) - b * (x - e)) / det]);
+    const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+    const r = inkRegion(Math.floor(Math.min(...xs)), Math.floor(Math.min(...ys)), Math.ceil(Math.max(...xs)), Math.ceil(Math.max(...ys)));
+    inkTf.out += inkFilter(id, inkTf.seed, r);
+    inkTf.ids[key] = id;
+    return id;
+  }
+  function defs(seed, box) {
+    const key = seed + '|' + box.join(',');
     if (defsCache[key]) return defsCache[key];
     const s = seed;
     const wash = (id, freq, wob, rim, varAmt, base) => `
@@ -137,23 +205,15 @@ ${base ? `<feFlood flood-color="#fffaf1" result="p"/><feComposite in="p" in2="d"
 <feMerge result="mm"><feMergeNode in="ha"/>${base ? '<feMergeNode in="pb"/>' : ''}<feMergeNode in="o"/></feMerge>
 <feGaussianBlur in="mm" stdDeviation="0.45"/>
 </filter>`;
-    const ink = (id, wob, grain, blur) => `
-<filter id="${id}" filterUnits="userSpaceOnUse" x="-2000" y="-2000" width="5000" height="5000" color-interpolation-filters="sRGB">
-<feTurbulence type="fractalNoise" baseFrequency="0.03" numOctaves="2" seed="${s + 5}" result="n"/>
-<feDisplacementMap in="SourceGraphic" in2="n" scale="${wob}" xChannelSelector="R" yChannelSelector="G" result="d"/>
-<feTurbulence type="fractalNoise" baseFrequency="0.22" numOctaves="2" seed="${s + 9}" result="g"/>
-<feColorMatrix in="g" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ${-grain} ${grain * 0.5 + 1.15}" result="ga"/>
-<feComposite in="d" in2="ga" operator="in" result="p"/>
-<feGaussianBlur in="p" stdDeviation="${blur}"/>
-</filter>`;
+    const r = inkRegion(box[0] - INK_PAD, box[1] - INK_PAD, box[0] + box[2] + INK_PAD, box[1] + box[3] + INK_PAD);
     const out = `<defs>
 ${wash('w', 0.022, 9, 3.2, 0.22, true)}
 ${wash('ws', 0.05, 3, 1.6, 0.18, true)}
 ${wash('t', 0.022, 8, 3, 0.32, false)}
 ${wash('bg', 0.008, 22, 7, 0.3, false)}
-${ink('k', 4, 2.2, 0.35)}
-${ink('ks', 1.6, 1.6, 0.25)}
-${ink('ke', 1.4, 0.4, 0.3)}
+${inkFilter('k', s, r)}
+${inkFilter('ks', s, r)}
+${inkFilter('ke', s, r)}
 </defs>`;
     defsCache[key] = out;
     return out;
@@ -177,7 +237,12 @@ ${ink('ke', 1.4, 0.4, 0.3)}
       const sw = s.sw || 3.2;
       const kf = s.kf || (sw < 2.6 ? 'ks' : 'k');
       const ko = s.ko != null ? ` opacity="${s.ko}"` : '';
-      out += `<path d="${s.d}" fill="none" stroke="${k}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" filter="url(#${kf})"${ko}${tf}/>`;
+      const stroke = `<path d="${s.d}" fill="none" stroke="${k}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"`;
+      // a transformed stroke gets an ink filter of its own (see inkFilterFor); outside svgOf
+      // it is filtered from an untransformed wrapping group instead
+      if (!tf) out += `${stroke} filter="url(#${kf})"${ko}/>`;
+      else if (inkTf) out += `${stroke} filter="url(#${inkFilterFor(kf, s.tf)})"${ko}${tf}/>`;
+      else out += `<g filter="url(#${kf})"${ko}>${stroke}${tf}/></g>`;
     }
     return out;
   }
@@ -197,8 +262,16 @@ ${ink('ke', 1.4, 0.4, 0.3)}
     const sp = sprites[id];
     if (!sp) throw new Error('No sprite ' + id);
     const [x, y, w, h] = sp.box;
-    const body = flat([sp.draw()]).map(shapeSvg).join('');
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${x} ${y} ${w} ${h}" width="${w}" height="${h}">${defs(sp.seed)}${body}</svg>`;
+    const tfInk = (inkTf = { seed: sp.seed, box: sp.box, ids: {}, out: '' });
+    let body;
+    try {
+      body = flat([sp.draw()]).map(shapeSvg).join('');
+    } finally {
+      inkTf = null;
+    }
+    let d = defs(sp.seed, sp.box);
+    if (tfInk.out) d = d.replace(/<\/defs>$/, tfInk.out + '\n</defs>');
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${x} ${y} ${w} ${h}" width="${w}" height="${h}">${d}${body}</svg>`;
   }
   function url(id) {
     const sp = sprites[id];
@@ -692,7 +765,7 @@ ${ink('ke', 1.4, 0.4, 0.3)}
           { d: C(30, 14, 6), f: '#fff3b0', fx: 'ws', k: false },
           { d: line([[6, 6], [30, 2], [54, 8]]), k: SEPIA, sw: 2, f: null },
         ];
-        const text = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '">' + defs(7) + shapes.map(shapeSvg).join('') + '</svg>';
+        const text = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '">' + defs(7, [0, 0, w, h]) + shapes.map(shapeSvg).join('') + '</svg>';
         encoderWorker(); // (starting up meanwhile)
         const u = URL.createObjectURL(new Blob([text], { type: 'image/svg+xml' }));
         const svg = await loadImage(u);
@@ -1888,7 +1961,7 @@ ${ink('ke', 1.4, 0.4, 0.3)}
     fit, idle, stats, cachedScales, cachedKeys, setSprite, shows, kOf, kPeak, deviceMatrix, rasterize, estimate, tweenStart, tweenEnd, spriteLog: spriteLogRows,
     sceneList, prefetchScene, idlePrefetch, play, warm, storeReady, persist, housekeep, showSvg, whenPainting, holdDecodes, lanes,
     sweep, audit, ready, cost, track, scaleChanged, resnapSoon, resized, hold, inexactToSvg,
-    C, E, R, smooth, blob, fluff, puffs, star, heart, line, rng, group,
+    C, E, R, smooth, blob, fluff, puffs, star, heart, line, rng, group, inkPad: INK_PAD,
     mix, inkOf, shade, tint, SEPIA,
   };
 })();
