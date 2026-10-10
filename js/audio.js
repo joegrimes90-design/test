@@ -28,16 +28,8 @@ AT.audio = (() => {
     ctx = new AC();
     ({ master, musicBus, sfxBus, voiceBus, duck } = build(ctx));
     master.gain.value = muted ? 0 : 1;
-    // iOS stops the context for a call, Siri or an alarm ('interrupted', or 'suspended'): carry on
-    // when it lets go, unless the game paused it itself (or it was never started by a tap)
-    let started = false;
-    const back = () => {
-      if (ctx.state === 'running') { started = true; return; }
-      if (!started || ctx.state === 'closed' || pausedFor.size || document.hidden || rec.on) return;
-      try { const p = ctx.resume(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* refused */ }
-      keepSession();
-    };
-    if (ctx.addEventListener) ctx.addEventListener('statechange', back);
+    started = ctx.state === 'running';
+    if (ctx.addEventListener) ctx.addEventListener('statechange', stateChanged);
   }
   // Sound pauses for two reasons, which can overlap: 'refit', while the game clock is
   // paused (sprites being repainted after a resize: hold()), so narration does not run
@@ -46,6 +38,19 @@ AT.audio = (() => {
   // resumed only when the last one ends (so coming back to the page mid-repaint stays quiet).
   const pausedFor = new Set();
   let resumeAfter = false;
+  let started = false; // the context has run (iOS lets it resume without a tap from then on)
+  function stateChanged() {
+    if (rec.on) return;
+    if (ctx.state === 'running') {
+      started = true;
+      // a resume that landed during one of the game's own pauses (asked for before it began)
+      if (pausedFor.size) { resumeAfter = true; const p = ctx.suspend(); if (p && p.catch) p.catch(() => {}); return; }
+      // back after iOS stopped it ('interrupted': a call, Siri, another app's sound) and let go
+      keepSession();
+    }
+    // (while 'interrupted', nothing: starting sound again would take it back from what iOS gave it
+    // to; iOS resumes the context itself when that ends, and a tap does too, see unlock())
+  }
   function pauseSound(why, on) {
     if (on === pausedFor.has(why)) return;
     const was = pausedFor.size > 0;
@@ -66,8 +71,10 @@ AT.audio = (() => {
   // frame not allowed the microphone (the claude.ai artifact frame) and on older iOS. A silent,
   // looping <audio> element started from a tap does it everywhere: while it plays, the page's
   // sound is 'playback' and Web Audio is heard too. Once a tap has started it, it may start again
-  // without one: after a cartoon (which takes the sound over and pauses it) and when the page
-  // comes back; it is paused while the page is hidden, and never started over a playing cartoon.
+  // without one: after a cartoon (which takes the sound over and pauses it), when the page comes
+  // back and when iOS gives the sound back after a call; it is paused while the page is hidden,
+  // never started over a playing cartoon, and not fought for while iOS has given the sound to
+  // something else (the next tap takes it back).
   // (A short clip: from about a second, iOS shows it on the lock screen. Never muted or at volume 0:
   // WebKit then counts it as silent and the page stays 'ambient'.) ?unmute=1 forces it on
   // elsewhere (tests), ?unmute=0 off.
@@ -115,15 +122,6 @@ AT.audio = (() => {
         keeperBlob = true;
         try { keeper.src = URL.createObjectURL(new Blob([keeperBytes()], { type: 'audio/wav' })); keepSession(); } catch (e) { /* no blobs */ }
       });
-      // paused by the system (a cartoon, a call): started again when the page is free of it
-      // (at most once a second: not a loop against a call that keeps stopping it)
-      let lastAuto = 0;
-      keeper.addEventListener('pause', () => setTimeout(() => {
-        const now = performance.now();
-        if (now - lastAuto < 1000) return;
-        lastAuto = now;
-        keepSession();
-      }, 0));
     }
     if (!keeper.paused) return;
     try {
@@ -134,20 +132,17 @@ AT.audio = (() => {
   function releaseSession() { if (keeper && !keeper.paused) keeper.pause(); }
 
   function unlock() {
-    // the silent <audio> first: the sound session changes as it starts
+    init(); // (first: the silent clip is made at the context's rate)
     keepSession();
-    init();
     if (!ctx) return;
     try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { /* optional */ }
-    // resumed inside the tap, even during a pause (a resume later, without a tap, iOS may
-    // refuse): suspended again at once, and resumed when the pause ends
-    if (ctx.state !== 'running') {
-      try {
-        const p = ctx.resume();
-        if (p && p.then) p.then(() => { if (pausedFor.size && ctx.state === 'running') { resumeAfter = true; ctx.suspend().catch(() => {}); } }, () => {});
-      } catch (e) { /* old Web Audio */ }
-    }
     if (pausedFor.size) resumeAfter = true; // resumed when the pause ends
+    // A context that has never run is started inside the tap even during a pause (iOS may refuse
+    // a first start without one); stateChanged() suspends it again at once. Once it has run, a
+    // pause keeps it suspended through taps.
+    if (ctx.state !== 'running' && (!started || !pausedFor.size)) {
+      try { const p = ctx.resume(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* old Web Audio */ }
+    }
     const b = ctx.createBuffer(1, 1, 22050);
     const s = ctx.createBufferSource();
     s.buffer = b; s.connect(ctx.destination); s.start(0);

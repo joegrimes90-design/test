@@ -6,14 +6,20 @@ import assert from 'node:assert/strict';
 import { loadGame } from '../helpers/load-game.mjs';
 
 class FakeAudioContext {
-  constructor() { this.state = 'running'; this.sampleRate = 48000; this.currentTime = 0; this.destination = {}; FakeAudioContext.last = this; }
+  constructor() { this.state = FakeAudioContext.initial || 'running'; this.refuse = !!FakeAudioContext.refuse; this.sampleRate = 48000; this.currentTime = 0; this.destination = {}; FakeAudioContext.last = this; }
   node(extra) { return { connect() {}, disconnect() {}, ...extra }; }
   createGain() { return this.node({ gain: { value: 1 } }); }
   createDynamicsCompressor() { const p = { value: 0 }; return this.node({ threshold: p, ratio: p, attack: p, release: p }); }
   createBuffer(ch, len, sr) { return { numberOfChannels: ch, length: len, sampleRate: sr, duration: len / sr }; }
   createBufferSource() { return this.node({ buffer: null, start() {}, stop() {} }); }
-  resume() { this.resumes = (this.resumes || 0) + 1; this.state = 'running'; return Promise.resolve(); }
-  suspend() { this.state = 'suspended'; return Promise.resolve(); }
+  // (the statechange event comes a task later, as in browsers; refuse: no tap allowed sound yet)
+  resume() {
+    this.resumes = (this.resumes || 0) + 1;
+    if (this.refuse) return Promise.reject(new Error('not allowed'));
+    this.state = 'running'; this.later(); return Promise.resolve();
+  }
+  suspend() { this.state = 'suspended'; this.later(); return Promise.resolve(); }
+  later() { setTimeout(() => { if (this.onchange) this.onchange(); }, 0); }
   addEventListener(type, fn) { if (type === 'statechange') this.onchange = fn; }
   set(state) { this.state = state; if (this.onchange) this.onchange(); }
 }
@@ -67,42 +73,61 @@ test('a resize while the page is hidden (a rotation in the background) keeps sou
   assert.equal(ctx.state, 'running');
 });
 
-test('sound that was not running stays off after a pause; a tap during the pause resumes it when the pause ends', async () => {
+test('sound that was not running stays off after a pause; a tap during the pause starts it and it plays when the pause ends', async () => {
+  FakeAudioContext.initial = 'suspended'; FakeAudioContext.refuse = true; // the browser has not allowed sound yet
   const { AT, ctx, setHidden } = boot();
-  ctx.state = 'suspended'; // e.g. the browser has not allowed sound yet
+  FakeAudioContext.initial = undefined; FakeAudioContext.refuse = false;
+  assert.equal(ctx.state, 'suspended');
   AT.audio.hold(true);
   setHidden(true);
   setHidden(false);
   AT.audio.hold(false);
   assert.equal(ctx.state, 'suspended', 'a pause never starts sound by itself');
   AT.audio.hold(true);
+  ctx.refuse = false;
   const n = ctx.resumes || 0;
   AT.audio.unlock(); // a tap on the still scene
-  // resumed inside the tap (iOS may refuse a resume later, without one), suspended again at once
+  // never run yet: started inside the tap (iOS may refuse a first start later, without one) ...
   assert.equal(ctx.resumes, n + 1, 'resumed during the tap');
-  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 5));
+  // ... and suspended again at once
   assert.equal(ctx.state, 'suspended', 'not while the repaint holds it');
   AT.audio.hold(false);
   assert.equal(ctx.state, 'running');
 });
 
-test('iOS stopping the sound (a call, Siri: \'interrupted\') starts it again when it lets go, but never a pause of the game\'s own', () => {
+test('iOS stopping the sound (a call, Siri, another app\'s sound: \'interrupted\') is left to iOS: never fought for; a tap or iOS resumes it', () => {
   const { AT, ctx, setHidden } = boot();
-  ctx.set('running');
   ctx.set('interrupted');
-  assert.equal(ctx.state, 'running', 'resumed by itself');
-  // the game's own pauses are left alone
+  assert.equal(ctx.state, 'interrupted', 'not taken back');
+  AT.audio.unlock(); // a tap
+  assert.equal(ctx.state, 'running');
+  // interrupted when a pause begins: resumed when it ends
+  ctx.set('interrupted');
+  setHidden(true);
+  setHidden(false);
+  assert.equal(ctx.state, 'running');
+});
+
+test('a resume that lands during a pause (asked for before it began) is suspended again', () => {
+  const { AT, ctx } = boot();
   AT.audio.hold(true);
-  ctx.set('suspended');
+  assert.equal(ctx.state, 'suspended');
+  ctx.set('running'); // e.g. hold(false)'s resume, landing after the next hold(true)
   assert.equal(ctx.state, 'suspended');
   AT.audio.hold(false);
   assert.equal(ctx.state, 'running');
-  setHidden(true);
+});
+
+test('once sound has run, a tap during a pause leaves it suspended (no held narration leaks)', () => {
+  const { AT, ctx } = boot();
+  AT.audio.hold(true);
+  const n = ctx.resumes || 0;
+  AT.audio.unlock();
+  assert.equal(ctx.resumes || 0, n, 'not resumed');
   assert.equal(ctx.state, 'suspended');
-  ctx.set('interrupted');
-  assert.equal(ctx.state, 'interrupted', 'not while the page is hidden');
-  setHidden(false);
-  assert.equal(ctx.state, 'running', 'interrupted counted as running when the pause began');
+  AT.audio.hold(false);
+  assert.equal(ctx.state, 'running');
 });
 
 test('a context never started by a tap is not started by a state change', () => {
